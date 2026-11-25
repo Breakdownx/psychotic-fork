@@ -48,17 +48,6 @@ pub struct Settings {
     /// from an in-memory `Settings` the watchdog never sees.
     pub auto_patch: bool,
 
-    #[serde(default)]
-    pub group_key: String,
-
-    /// When the group code and the user's own proxy were last set (unix
-    /// seconds, 0 = never). The one added later goes first in the route table
-    /// (owner, 2026-10-05).
-    #[serde(default)]
-    pub group_key_at: u64,
-    #[serde(default)]
-    pub own_proxy_at: u64,
-
     /// The user switched the client patch **off** on purpose.
     ///
     /// The one thing auto-patch must never do is put back a patch the user took
@@ -80,10 +69,9 @@ pub struct Settings {
     /// on when any of its parts is, which keeps one truth instead of two.
     pub dns: bool,
     pub local_proxy: bool,
-    pub group_proxy: bool,
 
     /// Diagnostics only, set by hand in `settings.json`, never by the window:
-    /// the one route the gate hosts may take (`own`, `group`, `exits`, `relay`,
+    /// the one route the gate hosts may take (`own`, `exits`, `relay`,
     /// `direct`, `vpn`), so a measurement can say which path it timed. Empty =
     /// the normal route table. A named route that is not usable yields no route
     /// at all rather than quietly measuring another one.
@@ -154,14 +142,10 @@ impl Default for Settings {
         Self {
             client_patch: false,
             auto_patch: true,
-            group_key: String::new(),
-            group_key_at: 0,
-            own_proxy_at: 0,
             patch_declined: false,
             decline_unrecorded: false,
             dns: true,
             local_proxy: true,
-            group_proxy: false,
             debug_route: String::new(),
             disabled_providers: Vec::new(),
             custom_dns: String::new(),
@@ -229,14 +213,6 @@ impl Settings {
         self.auto_patch && !self.patch_declined
     }
 
-    pub fn group_proxy_configured(&self) -> bool {
-        !self.group_key.trim().is_empty()
-    }
-
-    pub fn group_proxy_wanted(&self) -> bool {
-        self.group_proxy && self.group_proxy_configured()
-    }
-
     pub fn provider_enabled(&self, name: &str) -> bool {
         !self
             .disabled_providers
@@ -289,14 +265,10 @@ fn parse(text: &str) -> Option<Settings> {
     let value: serde_json::Value =
         serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
     let unrecorded = value.get("patch_declined").is_none();
-    let group_unrecorded = value.get("group_proxy").is_none();
     let mut s: Settings = serde_json::from_value(value).ok()?;
     if unrecorded {
         s.patch_declined = !s.client_patch;
         s.decline_unrecorded = true;
-    }
-    if group_unrecorded || !s.group_proxy_configured() {
-        s.group_proxy = s.group_proxy_configured();
     }
     Some(s)
 }
@@ -469,21 +441,6 @@ pub fn local_proxy_wanted() -> bool {
     cached().local_proxy
 }
 
-/// Whether the configured group proxy may be used as a route.
-pub fn group_proxy_enabled() -> bool {
-    cached().group_proxy_wanted()
-}
-
-/// The user's own proxy was set after the group code, so it goes first.
-pub fn own_proxy_first() -> bool {
-    let c = cached();
-    c.own_proxy_at > c.group_key_at
-}
-
-pub fn group_key() -> String {
-    cached().group_key.clone()
-}
-
 pub fn debug_route() -> String {
     cached().debug_route.clone()
 }
@@ -499,7 +456,6 @@ mod tests {
         // "first run" path that every new user takes.
         let s = Settings::default();
         assert!(s.dns && s.local_proxy && s.auto_patch);
-        assert!(!s.group_proxy_wanted());
         assert!(s.rotate_providers, "the pool races by default");
         assert!(
             !s.client_patch,
@@ -512,15 +468,25 @@ mod tests {
     }
 
     #[test]
-    fn legacy_group_switch_requires_a_code_and_keeps_explicit_opt_out() {
-        let empty = parse(r#"{"group_proxy":true,"group_key":" "}"#).unwrap();
-        assert!(!empty.group_proxy);
-        assert!(!empty.group_proxy_wanted());
-        let enabled = parse(r#"{"group_proxy":true,"group_key":"saved"}"#).unwrap();
-        assert!(enabled.group_proxy_wanted());
-        let disabled = parse(r#"{"group_proxy":false,"group_key":"saved"}"#).unwrap();
-        assert!(disabled.group_proxy_configured());
-        assert!(!disabled.group_proxy_wanted());
+    fn legacy_group_fields_are_ignored_without_resetting_other_settings() {
+        let s = parse(
+            r#"{
+            "group_key":"old-code", "group_key_at":42, "group_proxy":true,
+            "own_proxy_at":43, "own_proxy":"http://127.0.0.1:8080",
+            "own_proxy_enabled":true, "dns":false, "local_proxy":false,
+            "debug_route":"group", "patch_declined":true
+        }"#,
+        )
+        .expect("old settings still load");
+        assert!(s.own_proxy_enabled);
+        assert_eq!(s.own_proxy, "http://127.0.0.1:8080");
+        assert!(!s.dns && !s.local_proxy);
+        // Removing an unavailable diagnostic pin would allow other routes.
+        assert_eq!(s.debug_route, "group");
+        let json = serde_json::to_value(&s).expect("serializes");
+        for removed in ["group_key", "group_key_at", "group_proxy", "own_proxy_at"] {
+            assert!(json.get(removed).is_none(), "obsolete {removed} was saved");
+        }
     }
 
     /// G38 under D27: switching the patch off keeps it off, whatever auto-patch

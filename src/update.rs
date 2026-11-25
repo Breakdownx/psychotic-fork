@@ -26,12 +26,8 @@ const MAX_BODY: usize = 256 * 1024;
 
 /// The version this binary shipped as, in the form the release tags use.
 ///
-/// `CARGO_PKG_VERSION` only ever holds the three-digit part (`2.12.2`) because
-/// `build_rust.py` deliberately keeps the fourth digit out of Cargo.toml — a
-/// changed Cargo version re-salts every licence key (I2). So the full shipped
-/// name (`2.12.2_3`) comes from build.rs instead. Without it a `_3` build would
-/// compare itself against tag `v2.12.2_3` as if it were `2.12.2`, and claim an
-/// update that does not exist.
+/// Cargo supplies the three-part package version. A release built with a
+/// fourth component gets its full tag (e.g. `2.12.2_3`) from build.rs.
 pub fn current_version() -> &'static str {
     option_env!("AG_FULL_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
@@ -325,11 +321,8 @@ pub fn check_update_cached(force: bool) -> Result<Option<ReleaseInfo>, String> {
 
 /// Watches for a newer release for as long as the receiver lives.
 ///
-/// Checked once immediately — the banner has to be up before the licence screen
-/// is even answered — and then every `CHECK_INTERVAL` for a window that stays
-/// open. Only the first pass may answer from the on-disk cache: after that the
-/// thread has already waited the full interval, so re-reading a cache it wrote
-/// itself would just double the wait.
+/// Checks at startup and every `CHECK_INTERVAL` while the window stays open.
+/// Only the first check can use the on-disk cache.
 pub fn spawn_watch(tx: std::sync::mpsc::Sender<ReleaseInfo>, wake: Box<dyn Fn() + Send>) {
     std::thread::Builder::new()
         .name("update-watch".to_string())

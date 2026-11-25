@@ -86,9 +86,9 @@ pub fn run(note: Option<String>) -> Result<(), String> {
     }
 
     let mut terminal = ratatui::try_init().map_err(|e| format!("терминал недоступен: {e}"))?;
-    // Bracketed paste makes a pasted key one event instead of 25 keystrokes.
+    // Bracketed paste makes pasted text one event instead of many keystrokes.
     // Windows' console has no such mode; there a paste arrives as keys, which
-    // the key field takes just as well.
+    // the input field takes just as well.
     #[cfg(not(windows))]
     let _ = ratatui::crossterm::execute!(
         std::io::stdout(),
@@ -115,7 +115,6 @@ enum Input {
     Path { text: String, error: Option<String> },
     OwnProxy { text: String },
     CustomDns { text: String },
-    GroupKey { text: String },
 }
 
 /// One selectable line of the main list.
@@ -132,8 +131,6 @@ enum Row {
     Provider(usize),
     OwnProxyText,
     CustomDnsText,
-    GroupProxyText,
-    GroupProxyPaste,
     Report,
 }
 
@@ -192,9 +189,8 @@ impl App {
                 ));
             }
         }
-        // The unlocker is free: no licence gate, so the UI is up and auto-patch
-        // may act straight away.
-        worker.send(Cmd::Unlocked);
+        // The UI is ready, so auto-patch may act straight away.
+        worker.send(Cmd::UiReady);
         let mut list = ListState::default();
         list.select(Some(0));
         Self {
@@ -314,8 +310,7 @@ impl App {
         if let Some(
             Input::Path { text: t, .. }
             | Input::OwnProxy { text: t }
-            | Input::CustomDns { text: t }
-            | Input::GroupKey { text: t },
+            | Input::CustomDns { text: t },
         ) = &mut self.input
         {
             t.push_str(text);
@@ -327,8 +322,7 @@ impl App {
         let text = match input {
             Input::Path { text, .. }
             | Input::OwnProxy { text }
-            | Input::CustomDns { text }
-            | Input::GroupKey { text } => text,
+            | Input::CustomDns { text } => text,
         };
         match k.code {
             KeyCode::Esc => self.input = None,
@@ -367,12 +361,6 @@ impl App {
             }
             Some(Input::CustomDns { text }) => {
                 self.worker.send(Cmd::SetCustomDns(text.trim().to_string()))
-            }
-            Some(Input::GroupKey { text }) => {
-                let key = text.trim().to_string();
-                if !key.is_empty() {
-                    self.worker.send(Cmd::SetGroupKey { text: key, enable: true });
-                }
             }
             None => {}
         }
@@ -488,13 +476,6 @@ impl App {
                     });
                     return;
                 }
-                if cap == Cap::GroupProxy
-                    && !state.is_on()
-                    && !self.status.as_ref().is_some_and(|s| s.group_proxy_configured)
-                {
-                    self.input = Some(Input::GroupKey { text: String::new() });
-                    return;
-                }
                 self.worker.send(Cmd::Set(cap, !state.is_on()));
             }
             Row::Bypass => {
@@ -502,8 +483,7 @@ impl App {
                     return;
                 }
                 let on = !self.status.as_ref().is_some_and(|s| s.bypass_on());
-                let group_configured = self.status.as_ref().is_some_and(|s| s.group_proxy_configured);
-                for cap in ops::bypass_order(on, group_configured) {
+                for cap in ops::bypass_order(on) {
                     self.worker.send(Cmd::Set(cap, on));
                 }
             }
@@ -525,20 +505,6 @@ impl App {
                         .send(Cmd::SetProvider(p.name.clone(), !p.enabled));
                 }
             }
-            Row::GroupProxyPaste => {
-                // Over SSH (or with no display) there is no clipboard to read:
-                // the key is then typed or pasted into a field, which the
-                // terminal delivers as a bracketed paste.
-                match crate::utils::clipboard_text().filter(|t| !t.trim().is_empty()) {
-                    Some(text) => self.worker.send(Cmd::SetGroupKey { text, enable: true }),
-                    None => {
-                        self.input = Some(Input::GroupKey {
-                            text: String::new(),
-                        })
-                    }
-                }
-            }
-            Row::GroupProxyText => {}
             Row::OwnProxyText => {
                 self.input = Some(Input::OwnProxy {
                     text: crate::settings::Settings::load().own_proxy,
@@ -701,9 +667,6 @@ impl App {
             }
             rows.push(Row::CustomDnsText);
             rows.push(Row::Cap(Cap::LocalProxy));
-            rows.push(Row::Cap(Cap::GroupProxy));
-            rows.push(Row::GroupProxyText);
-            rows.push(Row::GroupProxyPaste);
             rows.push(Row::Cap(Cap::OwnProxy));
             rows.push(Row::OwnProxyText);
         }
@@ -737,8 +700,6 @@ impl App {
             }
             Row::Advanced => "Детали обхода: DNS-серверы, прокси, выходы.".into(),
             Row::Provider(_) => "Пробел — включить или выключить сервер, +/- — выше или ниже в списке.".into(),
-            Row::GroupProxyText => "Состояние ключа.".into(),
-            Row::GroupProxyPaste => "Вставить полученный ключ (из буфера обмена или в поле ввода).".into(),
             Row::CustomDnsText => "Enter — задать свой DNS: IPv4, https://… (DoH) или tls://… (DoT) через пробел.".into(),
             Row::OwnProxyText => {
                 "Enter — изменить адрес: логин:пароль@адрес:порт (или адрес:порт без пароля).".into()
@@ -826,23 +787,6 @@ impl App {
                 let name = format!("{}. {}", i + 1, status::provider_name(&p.name));
                 switch_line("      ", &name, &state, busy, width)
             }
-            Row::GroupProxyText => {
-                let key_text = if crate::settings::group_key().is_empty() {
-                    "ключа нет"
-                } else if crate::group::key_rejected() {
-                    "ключ перестал работать"
-                } else {
-                    "ключ есть"
-                };
-                ListItem::new(Line::from(vec![
-                    Span::raw("      Состояние: "),
-                    Span::styled(key_text, Style::new().fg(Color::Gray)),
-                ]))
-            }
-            Row::GroupProxyPaste => ListItem::new(Line::from(vec![Span::styled(
-                "      > Вставить ключ из буфера",
-                Style::new().fg(Color::Cyan),
-            )])),
             Row::CustomDnsText => {
                 let text = self.custom_dns_text();
                 let shown = if text.is_empty() {
@@ -1097,12 +1041,6 @@ impl App {
                 "Формат: логин:пароль@адрес:порт — или просто адрес:порт, если пароля нет. \
                  Например ivan:secret@203.0.113.9:3128. Только HTTP-прокси. \
                  Пустая строка — убрать прокси.",
-                text,
-                None,
-            ),
-            Some(Input::GroupKey { text }) => (
-                " Ключ группового прокси ",
-                "Буфер обмена недоступен или пуст. Вставьте ключ сюда (Ctrl+Shift+V или правая кнопка мыши в терминале) или наберите его.",
                 text,
                 None,
             ),

@@ -13,9 +13,7 @@ if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 def read_canary_const(name, canary_rs_path=r"src\canary.rs"):
-    """Reads a committed const out of src/canary.rs. Same single-source-of-truth
-    trick as read_base_secret, so build.rs, the binary, this script and
-    tools/canary_check.py cannot drift apart."""
+    """Read the same canary definition used by the binary and build.rs."""
     with open(canary_rs_path, 'r', encoding='utf-8') as f:
         src = f.read()
     m = re.search(r'pub const %s: &str = "([^"]*)"' % re.escape(name), src)
@@ -1095,21 +1093,10 @@ def main():
 
     VERSION = "2.35.1"
     version = VERSION
-    # env!("CARGO_PKG_VERSION") only sees MAJOR.MINOR.PATCH, so the key salt uses
-    # the same trimmed value the binary will compile with.
-    #
-    # The build number is separated by "_" so it can never be mistaken for a
-    # fourth semver component: "2.9.1_14" splits to "2.9.1" here, whereas
-    # "2.9.1.14" put through the old ".".join(...[:3]) would have been fine but
-    # any future edit to this line could silently write a 4-part version into
-    # Cargo.toml - and a changed Cargo version re-salts and invalidates every
-    # licence key that has ever been issued. Both spellings are accepted.
+    # The Cargo package version has three components; release names can also
+    # carry a build number, e.g. 2.9.1_14.
     cargo_version = ".".join(version.split("_")[0].split(".")[:3])
     print(f"[INFO] Build version: {version}")
-
-    # Keys removed: the unlocker is free. Nothing here reads a secret from the
-    # sources or mints licence keys any more.
-    main_rs_path = r"src\main.rs"
 
     try:
         # 1. Sync the version in Cargo.toml so env!("CARGO_PKG_VERSION") matches
@@ -1189,8 +1176,6 @@ def main():
         if freed:
             print(f"[INFO] target\\ (cargo test, rust-analyzer): удалено {_mb(freed)} того, "
                   f"что не использовалось {DEV_CACHE_KEEP_DAYS} дней.")
-
-        print("\n[INFO] Анлокер бесплатный: ключ не нужен.")
 
     except subprocess.CalledProcessError as e:
         # No cache is pruned after a failed build: see "Build caches" above.

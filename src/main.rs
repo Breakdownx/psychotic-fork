@@ -32,12 +32,9 @@ mod egress;
 mod elevate;
 mod endpoint;
 mod gate;
-pub mod group;
-mod group_key;
 mod gui;
 mod health;
 mod hosts_pin;
-mod hwid;
 mod instances;
 #[cfg(windows)]
 mod launch_guard;

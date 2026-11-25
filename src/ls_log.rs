@@ -47,8 +47,7 @@ const REGION_400: &str = "user location is not supported";
 /// The same refusal as it comes back from the sign-in call: `onboardUser` answers
 /// `403 PERMISSION_DENIED` with `reason: UNSUPPORTED_LOCATION` (Â«account is not
 /// currently available in your locationÂ»), not the 400 above - seen 2026-11-11
-/// on a fresh login through the group route, where the relay read nothing and
-/// kept the route that had just been refused. The JSON form is matched, once per
+/// on a fresh login. The JSON form is matched once per
 /// refusal: the same word is repeated in the `API Error:` line after it.
 const REGION_403: &str = "\"reason\": \"unsupported_location\"";
 

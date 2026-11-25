@@ -53,7 +53,6 @@ pub enum Cap {
     LocalProxy,
     /// The user's own HTTP proxy.
     OwnProxy,
-    GroupProxy,
     /// Whether the DNS pool rotates, or only its first enabled member answers.
     DnsRotation,
     // `VpnDetect` is gone (D25): the layer no longer stands down for a tunnel,
@@ -76,7 +75,6 @@ impl Cap {
             Cap::Dns => "Обход через DNS",
             Cap::LocalProxy => "Локальный прокси",
             Cap::OwnProxy => "Свой HTTP-прокси",
-            Cap::GroupProxy => "Прокси из группы",
             Cap::DnsRotation => "Ротация DNS-серверов",
         }
     }
@@ -195,9 +193,7 @@ pub struct Status {
     pub dns: State,
     pub local_proxy: State,
     pub own_proxy: State,
-    pub group_proxy: State,
     pub own_proxy_configured: bool,
-    pub group_proxy_configured: bool,
     pub dns_rotation: State,
     /// What the last measurement saw. `None` means it has not been taken yet;
     /// taking it spawns PowerShell, so it is not done on every refresh.
@@ -238,7 +234,6 @@ impl Status {
             Cap::Dns => &self.dns,
             Cap::LocalProxy => &self.local_proxy,
             Cap::OwnProxy => &self.own_proxy,
-            Cap::GroupProxy => &self.group_proxy,
             Cap::DnsRotation => &self.dns_rotation,
         }
     }
@@ -248,7 +243,6 @@ impl Status {
     pub fn bypass_on(&self) -> bool {
         self.dns.is_on()
             || self.local_proxy.is_on()
-            || self.group_proxy.is_on()
             || self.own_proxy.is_on()
     }
 }
@@ -259,16 +253,12 @@ impl Status {
 /// proxy variable may name it (I53) â€” the worker runs these in order, so DNS
 /// finishes first. OFF: the variable comes off *before* the listener it names
 /// goes away, or a sign-in that lands in between dials a dead port (G31).
-pub fn bypass_order(on: bool, group_configured: bool) -> Vec<Cap> {
+pub fn bypass_order(on: bool) -> Vec<Cap> {
     if on {
         // The user's own proxy is theirs to switch on: it needs an address.
-        let mut caps = vec![Cap::Dns, Cap::LocalProxy];
-        if group_configured {
-            caps.push(Cap::GroupProxy);
-        }
-        caps
+        vec![Cap::Dns, Cap::LocalProxy]
     } else {
-        vec![Cap::LocalProxy, Cap::OwnProxy, Cap::GroupProxy, Cap::Dns]
+        vec![Cap::LocalProxy, Cap::OwnProxy, Cap::Dns]
     }
 }
 
@@ -295,8 +285,8 @@ pub enum Event {
 /// UI → worker.
 pub enum Cmd {
     /// The UI is up. Auto-patch may now act on the initial scan. Sent once at
-    /// startup (the unlocker is free — there is no licence gate to pass first).
-    Unlocked,
+    /// startup.
+    UiReady,
     /// Persist the user's UI theme preference.
     SetTheme(crate::settings::ThemeMode),
     /// Ask the system again where the client's traffic leaves.
@@ -330,7 +320,6 @@ pub enum Cmd {
     PatchInstall(PathBuf),
     SetOwnProxy { text: String, enable: bool },
     SetCustomDns(String),
-    SetGroupKey { text: String, enable: bool },
     SetProvider(String, bool),
     /// The whole pool in the order the user dragged it into.
     ReorderProviders(Vec<String>),
@@ -486,7 +475,7 @@ fn run_worker(
                     ctx.settings.save();
                 }
             }
-            Cmd::Unlocked => {
+            Cmd::UiReady => {
                 // Re-read binary patch status if auto-patch changed an install.
                 if auto_patch_found(&mut ctx) {
                     push_status(&mut ctx, Scan::Deep);
@@ -610,15 +599,6 @@ fn run_worker(
                 ctx.settings.save();
                 push_status(&mut ctx, Scan::Settings);
             }
-            Cmd::SetGroupKey { text, enable } => {
-                ctx.busy(Some("Проверка ключа"));
-                let result = set_group_key(&mut ctx, &text, enable);
-                if result.is_ok() {
-                    push_status(&mut ctx, scan_after(Cap::GroupProxy));
-                }
-                proxy_saved(&ctx, Cap::GroupProxy, result);
-                ctx.busy(None);
-            }
             Cmd::EnableAll => {
                 ctx.busy(Some("Включаю"));
                 enable_all(&mut ctx);
@@ -638,7 +618,6 @@ fn run_worker(
                 ctx.settings.patch_declined = true;
                 ctx.settings.dns = false;
                 ctx.settings.local_proxy = false;
-                ctx.settings.group_proxy = false;
                 ctx.settings.own_proxy_enabled = false;
                 if !ctx.settings.save() {
                     ctx.log(Level::Err, "Не удалось сохранить отключение автопатча; откат не начат.");
@@ -788,10 +767,8 @@ fn first_enabled_provider(s: &Settings) -> Option<&'static str> {
 /// How much of the system has to be re-read after `cap` was flipped.
 ///
 /// The rule is "what could this switch have changed", not "how important is it":
-/// `VerifyTls`, `VpnDetect` and `GroupProxy` write one field of `settings.json`
-/// and nothing else, so asking Windows about scheduled tasks, NRPT rules and the
-/// user environment afterwards is two seconds of latency buying a byte-identical
-/// answer.
+/// System capabilities re-read service and environment state; the client patch
+/// additionally requires inspecting the binaries.
 fn scan_after(cap: Cap) -> Scan {
     match cap {
         // The one action that changes what is *inside* the binaries, so the one
@@ -800,7 +777,6 @@ fn scan_after(cap: Cap) -> Scan {
         Cap::Watchdog | Cap::Dns | Cap::LocalProxy | Cap::OwnProxy | Cap::DnsRotation => {
             Scan::System
         }
-        Cap::GroupProxy => Scan::Settings,
     }
 }
 
@@ -874,20 +850,11 @@ fn settings_only_status(ctx: &Ctx, prev: Status) -> Status {
 }
 
 impl Status {
-    /// The four switches that are nothing but a field of `settings.json`, plus
-    /// the provider list they order. Written once so `read_status` and
-    /// `settings_only_status` cannot drift apart — the bug that would produce is
+    /// The settings switches and the provider list they order. Written once so
+    /// `read_status` and `settings_only_status` cannot drift apart — that would produce
     /// a switch that answers differently depending on which path drew it.
     fn with_settings_switches(mut self, s: &Settings) -> Self {
-        // On, but the pool refuses this key (replaced by a newer one, or the PC
-        // changed): said on the switch itself, where the user looks.
         self.own_proxy_configured = self.own_proxy.is_on() || upstream::parse(&s.own_proxy).is_ok();
-        self.group_proxy_configured = s.group_proxy_configured();
-        self.group_proxy = if s.group_proxy_wanted() && crate::group::key_rejected() {
-            State::Partial(crate::group::KEY_DEAD_NOTE.into())
-        } else {
-            on_off(s.group_proxy_wanted())
-        };
         self.custom_dns_text = s.custom_dns.clone();
         self.dns_rotation = if s.rotate_providers {
             State::On
@@ -909,14 +876,6 @@ impl Status {
             })
             .collect();
         self
-    }
-}
-
-fn on_off(v: bool) -> State {
-    if v {
-        State::On
-    } else {
-        State::Off
     }
 }
 
@@ -1014,9 +973,7 @@ fn read_status(ctx: &mut Ctx, deep: bool) -> Status {
         own_proxy,
         own_proxy_text,
         custom_dns_text: ctx.settings.custom_dns.clone(),
-        group_proxy: State::Off,
         own_proxy_configured: false,
-        group_proxy_configured: false,
         vpn: ctx.vpn,
         dns_rotation: State::Off,
         relay_outdated,
@@ -1151,7 +1108,7 @@ fn dns_state(
         // the fallback providers only, which works but is not what was asked
         // for — and it is exactly what a crashed relay looks like.
         (true, false) => State::Partial("правила стоят, служба не запущена".into()),
-        // A service that runs for the sake of a route (own proxy, group, exits)
+        // A service that runs for the sake of a route (own proxy, exits)
         // is not a half-installed DNS layer: the DNS switch is off, and drawing
         // it as `Partial` - which reads as on - made it impossible to switch off
         // while any route kept the service up.
@@ -1423,26 +1380,6 @@ fn apply(ctx: &mut Ctx, cap: Cap, on: bool) {
                 },
             );
         }
-        (Cap::GroupProxy, on) => {
-            if on && !ctx.settings.group_proxy_configured() {
-                ctx.log(Level::Warn, "Добавьте код для прокси из группы.");
-                return;
-            }
-            ctx.settings.group_proxy = on;
-            ctx.log(
-                Level::Ok,
-                if on {
-                    "Прокси из группы включён."
-                } else {
-                    "Прокси из группы выключен."
-                },
-            );
-            if on {
-                ensure_route_carrier(ctx);
-            } else {
-                release_route_carrier(ctx);
-            }
-        }
     }
 }
 
@@ -1463,9 +1400,6 @@ fn enable_all(ctx: &mut Ctx) {
     if !patch_is_on(ctx) {
         apply(ctx, Cap::ClientPatch, true);
     }
-    // Nothing but a line in settings.json, so it needs nobody's permission.
-    // The service they ride on is brought up below, with DNS.
-    ctx.settings.group_proxy = ctx.settings.group_proxy_configured();
     let dns_on =
         dns::is_nrpt_applied() && background::is_running() && !background::relay_is_outdated();
     if !dns_on {
@@ -1933,7 +1867,7 @@ fn disable_dns(ctx: &mut Ctx) {
     ctx.log(Level::Step, "Отключение обхода через DNS");
 
     // The relay is also the carrier of every route (local proxy, own proxy,
-    // group, exits): it stays while any of them is wanted, and only the rules
+    // exits): it stays while any of them is wanted, and only the rules
     // come off.
     let keep_relay = routes_want_relay(&ctx.settings);
 
@@ -2091,7 +2025,7 @@ fn routes_want_relay(s: &Settings) -> bool {
 
 /// A route that was switched on by itself has to have something to ride on.
 ///
-/// The routes (own proxy, group, exits) are chosen by the local proxy, which
+/// The routes (own proxy, exits) are chosen by the local proxy, which
 /// lives in the relay, and the client reaches that proxy by its variable or by
 /// the loopback door. With DNS off neither exists, so a route switched on alone
 /// carried nothing - which is exactly how «свой прокси» "did not work" with the
@@ -2154,7 +2088,7 @@ fn release_route_carrier(ctx: &mut Ctx) {
 /// `routes_want_relay` minus the proxy variable's own wish: a route's carrier
 /// sets that wish itself, so it must not count against letting go of it.
 fn routes_want_relay_without_proxy_var(s: &Settings) -> bool {
-    s.own_proxy_enabled || s.group_proxy_wanted()
+    s.own_proxy_enabled
 }
 
 /// Re-writes the NRPT rules when the pool they name has changed.
@@ -2324,23 +2258,6 @@ fn proxy_saved(ctx: &Ctx, cap: Cap, result: Result<(), String>) {
     (ctx.wake)();
 }
 
-fn set_group_key(ctx: &mut Ctx, text: &str, enable: bool) -> Result<(), String> {
-    crate::group_key::parse_key(text).map_err(|error| error.to_string())?;
-    let mut settings = ctx.settings.clone();
-    settings.group_proxy = enable || settings.group_proxy_wanted();
-    settings.group_key = text.trim().to_string();
-    settings.group_key_at = crate::gate::now_unix();
-    if !settings.save() {
-        return Err("Не удалось сохранить код из группы.".into());
-    }
-    ctx.settings = settings;
-    if ctx.settings.group_proxy_wanted() {
-        apply(ctx, Cap::GroupProxy, true);
-    }
-    ctx.log(Level::Ok, "Ключ принят.");
-    Ok(())
-}
-
 fn set_own_proxy(ctx: &mut Ctx, text: &str, enable: bool) -> Result<(), String> {
     let text = text.trim();
     let mut settings = ctx.settings.clone();
@@ -2373,7 +2290,6 @@ fn set_own_proxy(ctx: &mut Ctx, text: &str, enable: bool) -> Result<(), String> 
     // one that draws a region 400 is benched by the watch (G81). Refusing to save
     // it made the user keep a proxy they wanted out of the table altogether.
     upstream::save(&up).map_err(|error| format!("Прокси не сохранён: {error}"))?;
-    settings.own_proxy_at = crate::gate::now_unix();
     ctx.settings = settings;
     let saved = ctx.settings.save();
     ctx.log(Level::Ok, format!("Свой прокси включён: {}", up.display()));
@@ -2540,7 +2456,6 @@ mod tests {
     /// to Windows for scheduled tasks and environment variables.
     #[test]
     fn only_the_switches_that_touch_the_system_pay_for_a_system_scan() {
-        assert_eq!(scan_after(Cap::GroupProxy), Scan::Settings);
         assert_eq!(scan_after(Cap::Dns), Scan::System);
         assert_eq!(scan_after(Cap::LocalProxy), Scan::System);
         assert_eq!(scan_after(Cap::ClientPatch), Scan::Deep);
@@ -2554,7 +2469,6 @@ mod tests {
         assert!(!blank.bypass_on());
         for set in [
             |s: &mut Status| s.own_proxy = State::On,
-            |s: &mut Status| s.group_proxy = State::On,
             |s: &mut Status| s.local_proxy = State::On,
             |s: &mut Status| s.dns = State::On,
         ] {
@@ -2568,12 +2482,10 @@ mod tests {
     /// with it) and the user's own proxy included, or it would draw itself on again.
     #[test]
     fn master_off_takes_every_way_down_and_on_never_picks_the_users_proxy() {
-        let off = bypass_order(false, false);
+        let off = bypass_order(false);
         assert_eq!(off.last(), Some(&Cap::Dns));
-        assert!(off.contains(&Cap::OwnProxy) && off.contains(&Cap::GroupProxy));
-        assert!(!bypass_order(true, false).contains(&Cap::OwnProxy));
-        assert!(!bypass_order(true, false).contains(&Cap::GroupProxy));
-        assert!(bypass_order(true, true).contains(&Cap::GroupProxy));
+        assert!(off.contains(&Cap::OwnProxy));
+        assert!(!bypass_order(true).contains(&Cap::OwnProxy));
     }
 
     /// A service kept up for a route is not a half-installed DNS layer: with the
@@ -2590,7 +2502,6 @@ mod tests {
     fn the_service_is_wanted_while_any_route_is() {
         let mut s = Settings::default();
         s.local_proxy = false;
-        s.group_proxy = false;
         s.own_proxy_enabled = false;
         assert!(!routes_want_relay(&s));
         s.own_proxy_enabled = true;
@@ -2647,9 +2558,7 @@ mod tests {
             dns: State::Off,
             local_proxy: State::Off,
             own_proxy: State::Off,
-            group_proxy: State::Off,
             own_proxy_configured: false,
-            group_proxy_configured: false,
             dns_rotation: State::Off,
             vpn: None,
             own_proxy_text: String::new(),

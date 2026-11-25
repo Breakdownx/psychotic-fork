@@ -643,7 +643,6 @@ fn vpn_usable() -> bool {
 pub fn route_usable(kind: routes::Kind, host: &str) -> bool {
     match kind {
         routes::Kind::Own => upstream::available(),
-        routes::Kind::Group => crate::settings::group_proxy_enabled() && crate::group::available(),
         // The window's switch, checked at the one place the route is offered
         // from. Off means the route is simply not usable, which the table
         // already knows how to deal with - it is the same answer an exit that
@@ -1159,14 +1158,6 @@ fn try_relay_route(client: TcpStream, _host: &str, _port: u16) -> Result<(), Tcp
     Err(client)
 }
 
-fn try_group(client: TcpStream, host: &str, port: u16) -> Result<(), TcpStream> {
-    if port == 443 && is_gate_host(host) && crate::group::available() {
-        crate::group::tunnel(client, host, port)
-    } else {
-        Err(client)
-    }
-}
-
 /// Tries the built-in exits for a gate host, else hands the client straight back.
 /// The only place the private exits module is touched; a build from the public
 /// source has no such module and falls through to the relay and the DNS route.
@@ -1237,17 +1228,19 @@ fn serve(mut client: TcpStream, _if_index: u32) {
 const GATE_OPEN_BUDGET: Duration = Duration::from_secs(12);
 
 /// Walks the route table for one gate connection.
-fn serve_gate(client: TcpStream, host: &str, port: u16) {
+fn serve_gate(mut client: TcpStream, host: &str, port: u16) {
     let started = Instant::now();
-    let mut client = client;
+    let Some(order) = routes::order(&crate::settings::debug_route(), |k| route_usable(k, host)) else {
+        client.write_all(RESP_BAD_GATEWAY).ok();
+        return;
+    };
     let mut tried_direct = false;
-    for kind in routes::order(|k| route_usable(k, host)) {
+    for kind in order {
         if started.elapsed() >= GATE_OPEN_BUDGET {
             break;
         }
         let attempt = match kind {
             routes::Kind::Own => try_own_proxy(client, host, port),
-            routes::Kind::Group => try_group(client, host, port),
             routes::Kind::Exits => try_builtin_exit(client, host, port),
             routes::Kind::Relay => try_relay_route(client, host, port),
             routes::Kind::Direct => {

@@ -78,9 +78,7 @@ impl App {
         // The worker owns settings changes; the GUI reads the saved theme.
         let settings = Settings::load();
         theme::set_preference(&cc.egui_ctx, settings.theme);
-        // The unlocker is free: no licence gate, so the first scan and auto-patch
-        // start the moment the window opens.
-        worker.send(Cmd::Unlocked);
+        worker.send(Cmd::UiReady);
         Self {
             screen: Screen::Main,
             update: None,

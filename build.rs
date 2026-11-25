@@ -7,7 +7,7 @@ use std::path::Path;
 
 /// Reads a `const NAME: &str = "..."` literal straight out of src/canary.rs, so
 /// the source stays the single source of truth for the build script, the binary
-/// and tools/canary_check.py alike (same pattern as LICENSE_BASE_SECRET).
+/// and tools/canary_check.py alike.
 fn const_from_canary_rs(src: &str, name: &str) -> String {
     let needle = format!("pub const {}: &str = \"", name);
     let start = src
@@ -169,28 +169,12 @@ fn main() {
         bake_secret("exits_gen.rs", "EXITS", &exit_list);
     }
 
-    println!("cargo:rerun-if-changed=.group");
-    let group = if Path::new(".group").exists() {
-        let list = fs::read_to_string(".group").expect("read .group");
-        let cleaned = list
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .collect::<Vec<_>>()
-            .join("\n");
-        bake_secret("group_gen.rs", "GROUP", &cleaned);
-        !cleaned.is_empty()
-    } else {
-        bake_secret("group_gen.rs", "GROUP", "");
-        false
-    };
-
     // Which private routes this build actually got. Printed because the failure
     // mode is silent: a release built with one of the files missing works fine
     // and is simply slower, which is exactly the kind of thing that ships.
     println!(
-        "cargo:warning=private routes: relay={} exits={} group={}",
-        relay, exits, group
+        "cargo:warning=private routes: relay={} exits={}",
+        relay, exits
     );
 
     if env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows" {

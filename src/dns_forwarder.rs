@@ -169,7 +169,8 @@ pub const LISTEN_PORT: u16 = 53;
 ///     one kills the server alone and the app gives up on it after three restarts.
 /// 49 = DNS-AI is the only built-in DNS provider; NRPT has only the local relay.
 /// 50 = Report observed VPN egress for the relay's open gate connections.
-pub const RELAY_VERSION: u32 = 50;
+/// 51 = Remove the retired group proxy from the service.
+pub const RELAY_VERSION: u32 = 51;
 
 /// Written where an unelevated relay can write and an unelevated unlocker can
 /// read. Absent means a relay from before versioning, i.e. older than anything.
@@ -697,7 +698,6 @@ fn warm_forever() {
         // route working at all.
         if since_exits >= PROBE_HEALTHY_EVERY {
             proxy::probe_exits();
-            crate::group::probe_health();
             since_exits = Duration::ZERO;
         }
         // The direct route is timed on the same clock as the others, so the
@@ -943,16 +943,6 @@ fn on_refusals(count: usize, at: Instant, host: Option<&str>) {
                 if let Some((host, ip)) = routes::dns_endpoint(tunnel) {
                     crate::dns_route::feedback(&host, ip, false);
                 }
-            }
-            // A route-wide bench is not enough for the group: the same server
-            // would be picked again when it ends. Bench the server itself.
-            if matches!(kind, routes::Kind::Group)
-                && matches!(
-                    blamed,
-                    routes::Blamed::Benched(_) | routes::Blamed::AlreadyBenched
-                )
-            {
-                crate::group::bench_current_server();
             }
             match blamed {
                 routes::Blamed::Benched(penalty) => {

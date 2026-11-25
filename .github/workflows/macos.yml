@@ -6,7 +6,7 @@ name: macOS (arm64)
 # only here, so this is also the only place the re-sign-on-write path is exercised
 # for real.
 #
-# Private routes (built-in exits / relay / group) live in gitignored files. They
+# Private routes (built-in exits / relay) live in gitignored files. They
 # are rebuilt from repository secrets when those secrets are set, so an owner
 # build keeps full parity; without them the workflow still produces a working
 # public build (DNS route). Secret values are masked in the log, and the exit
@@ -50,7 +50,6 @@ jobs:
           EXITS: ${{ secrets.EXITS }}
           RELAY_RS: ${{ secrets.RELAY_RS }}
           RELAY_KEY: ${{ secrets.RELAY_KEY }}
-          GROUP: ${{ secrets.GROUP }}
         run: |
           set -eu
           # Each secret is base64 of the file's contents; absent => public build.
@@ -64,7 +63,6 @@ jobs:
           decode "$EXITS"      .exits
           decode "$RELAY_RS"   src/relay.rs
           decode "$RELAY_KEY"  .relay_key
-          decode "$GROUP"      .group
           # The relay route is compiled in only when both its files AND the opt-in
           # are present (build.rs); xbox took the public relay down, so it stays
           # off unless the owner ships relay.rs + .relay_key.

@@ -231,7 +231,7 @@ impl Facts {
                     )),
             relay_outdated: s.relay_outdated,
             // Rules are only owed while the DNS switch is on: a route running alone
-            // (own proxy, group, exits) has none by design.
+            // (own proxy, exits) has none by design.
             rules: s.rules || !s.dns.is_on() || !cfg!(target_os = "windows"),
             relay_reporting: relay.is_some(),
             refusal,
@@ -306,10 +306,6 @@ pub fn switch_text(cap: Cap) -> (&'static str, &'static str) {
             "Соединения Antigravity с этими двумя серверами идут через посредника внутри \
              вашего компьютера: он выбирает путь, который реально работает, и переключается \
              сам. Содержимое не расшифровывается — посредник только передаёт байты.",
-        ),
-        Cap::GroupProxy => (
-            "Прокси из группы",
-            "Выделенный сервер группы: через него идут только запросы к моделям.",
         ),
         Cap::OwnProxy => (
             "Свой HTTP-прокси",
