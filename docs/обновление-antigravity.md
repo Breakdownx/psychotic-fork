@@ -89,7 +89,7 @@ shasum -a 256 "/полный/путь/к/файлу"
 
 ### 2. Где лежат эти бинарники
 
-`binary_targets()` — [patch_binary.rs:646](../src/patch_binary.rs). Там
+`binary_targets()` — [patch_binary.rs:553](../src/patch_binary.rs). Там
 перечислены `agy`/`agy.exe`, `resources/bin/language_server(.exe)`, встроенный в
 IDE `extensions/antigravity/bin/language_server*` (с глобом по платформенному
 суффиксу) и `~/.gemini/bin`. На macOS путь к `Resources` даёт
@@ -104,7 +104,7 @@ Desktop больше не патчится. Определяется по мар
 `./ipcHandlers` и отсутствию старых `_handleAuthErrorResponse` / `getUserStatus` /
 `"AUTH_SUCCESS"` / `"SET_INELIGIBLE"`. Если Google снова поменяет компоновку shell —
 проверять и, возможно, чинить эту функцию и `process_install`
-([src/main.rs](../src/main.rs)).
+([src/patch_install.rs](../src/patch_install.rs)).
 
 ### 4. Регекс патча IDE `out/main.js`
 

@@ -8,35 +8,23 @@
 //! (kb/dns.md). Every signal the tool has about a route's region is therefore
 //! indirect: the exit's country, whether an address was substituted, whether a
 //! tunnel carried bytes. The client's log is the only place the refusal is
-//! written down in plain text, so the relay tails it.
+//! written down in plain text, so the window reads it.
 //!
 //! The other half is the one thing that proves the bypass works: a model answer
 //! logs `…/v1internal:streamGenerateContent?alt=sse Trace: 0x… ResponseID: …`
 //! when it starts streaming, and a refused turn logs no such line (measured on
 //! the IDE log of 2026-09-12: refusals 14:58–15:00, first `ResponseID` 15:16).
 //! Silence proves nothing - a user who gave up is silent too (G50) - so the
-//! window says "работает" only on this line, and the route table ranks routes by
-//! it (`routes`).
+//! window says "работает" only on this line.
 //!
-//! Tailing, not reading: each pass looks at the lines appended since the last
-//! one and nothing else, so an old refusal from a session hours ago cannot
-//! trigger anything now. A file seen for the first time is taken from its end
-//! for the same reason. A file that shrank was rotated or the app restarted, and
-//! is read from the start - it is new content either way.
-//!
-//! Two readers, asking different questions of the same file. `poll` is the
-//! relay's: "what came in since I last looked", which is what may be *acted*
-//! on. `newest_refusal` is the window's: "is the user hitting the gate right
-//! now", which has to be answerable about the minutes before this process
-//! started - so it reads the log's own stamps rather than a saved offset. The
-//! two share the pattern and the file list and nothing else; they run in
-//! different processes and neither moves the other's position.
+//! The question asked is "is the user hitting the gate right now", which has to
+//! be answerable about the minutes before this process started - so `history`
+//! reads the tail of each log and places lines by their own stamps rather than
+//! by a saved offset.
 
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::Duration;
 
 /// The refusal, as the language server logs it. Matched ASCII-case-insensitively
@@ -78,275 +66,10 @@ const OVERLOAD_MODEL: &[u8] = b"for model ";
 /// A re-login is the fix; no route changes it.
 const UNAUTH_401: &str = "unauthenticated (code 401)";
 
-/// A generation request the connection died under: `Run: attempt N failed
-/// (request failed: Post ".../streamGenerateContent?alt=sse": EOF)` before a
-/// byte came back, or `(stream reading error: unexpected EOF)` in the middle of
-/// the answer. One line per attempt - the executor's own final report repeats
-/// the last one without the word `attempt`, and is not counted.
-const DROP_ATTEMPT: &str = "attempt";
-const DROP_FAILED: &str = "failed (";
-const DROP_STREAM_EOF: &str = "stream reading error: unexpected eof";
-/// What the client's retries say once the first EOF has killed its connection
-/// to our proxy: attempts 2..N fail on `write tcp …: use of closed network
-/// connection`, never EOF again. Counting only EOF left the streak at 1 for six
-/// attempts and the dead route in place (2026-10-15).
-const DROP_CLOSED_CONN: &str = "use of closed network connection";
-
-/// Longest slice of appended log read in one pass. Anything beyond it is a log
-/// that grew by megabytes between two passes, which is not a session anyone is
-/// working in; the tail is what carries the news.
-const MAX_READ: u64 = 1024 * 1024;
-
 /// How many products the scan is willing to look at. A user profile does not
 /// hold more than a handful of `Antigravity*` folders, and a bound keeps a
 /// pathological `%APPDATA%` from turning a 15 s tick into a directory walk.
 const MAX_PRODUCTS: usize = 8;
-
-/// Where each watched file was read up to.
-static OFFSETS: Mutex<Option<HashMap<PathBuf, u64>>> = Mutex::new(None);
-
-/// The gate host each file last named in a `URL:` line, carried across passes:
-/// a refusal line names no host, and the call it refused was logged in an
-/// earlier chunk more often than not.
-static LAST_HOST: Mutex<Option<HashMap<PathBuf, String>>> = Mutex::new(None);
-
-/// Whether the first pass has run. Files found on it hold history and are taken
-/// from their end; a file that *appears* later is a new session - an IDE launch,
-/// a CLI run - and everything in it is news, from the first byte. Taking those
-/// from their end too lost the answer (or the refusal) a short CLI run writes
-/// before the next pass comes round.
-static FIRST_PASS_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// What one stretch of log said about the gate.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Tally {
-    /// Refusal lines. One refused turn writes several (the stream handler, the
-    /// executor and the error report each repeat it), so this counts lines, not
-    /// turns.
-    pub refusals: usize,
-    /// How long ago the newest refusal was stamped. `None` when there was none,
-    /// or its stamp could not be placed against the clock.
-    pub refused_ago: Option<Duration>,
-    /// Model answers: one line per answer that started streaming.
-    pub answers: usize,
-    pub answered_ago: Option<Duration>,
-    /// Which gate host the newest refusal was about: the host of the last
-    /// `URL: https://…` line before it in this file. The client keeps a
-    /// connection pool per host, and the two can sit on different routes.
-    pub refused_host: Option<String>,
-    /// The host the newest answer's own line names.
-    pub answered_host: Option<String>,
-    /// Generation attempts the connection died under (EOF), and the newest.
-    pub drops: usize,
-    pub dropped_ago: Option<Duration>,
-    pub dropped_host: Option<String>,
-}
-
-impl Tally {
-    pub fn is_empty(&self) -> bool {
-        self.refusals == 0 && self.answers == 0 && self.drops == 0
-    }
-
-    fn add(&mut self, other: Tally) {
-        self.refusals += other.refusals;
-        self.answers += other.answers;
-        self.drops += other.drops;
-        if other.dropped_ago.is_some()
-            && newer(self.dropped_ago, other.dropped_ago) == other.dropped_ago
-        {
-            self.dropped_host = other.dropped_host.clone();
-        } else if self.dropped_host.is_none() {
-            self.dropped_host = other.dropped_host.clone();
-        }
-        self.dropped_ago = newer(self.dropped_ago, other.dropped_ago);
-        // The host goes with whichever event is newer - an unplaceable one
-        // (no age) never displaces a placed one.
-        if other.refused_ago.is_some()
-            && newer(self.refused_ago, other.refused_ago) == other.refused_ago
-        {
-            self.refused_host = other.refused_host.clone();
-        } else if self.refused_host.is_none() {
-            self.refused_host = other.refused_host.clone();
-        }
-        if other.answered_ago.is_some()
-            && newer(self.answered_ago, other.answered_ago) == other.answered_ago
-        {
-            self.answered_host = other.answered_host.clone();
-        } else if self.answered_host.is_none() {
-            self.answered_host = other.answered_host.clone();
-        }
-        self.refused_ago = newer(self.refused_ago, other.refused_ago);
-        self.answered_ago = newer(self.answered_ago, other.answered_ago);
-    }
-}
-
-fn newer(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(x.min(y)),
-        (x, None) => x,
-        (None, y) => y,
-    }
-}
-
-/// One pass over every client log on the machine. Returns the files that
-/// gained a refusal or an answer since the last pass, with what each gained.
-pub fn poll() -> Vec<(PathBuf, Tally)> {
-    let mut out = Vec::new();
-    let Ok(mut guard) = OFFSETS.lock() else {
-        return out;
-    };
-    let offsets = guard.get_or_insert_with(HashMap::new);
-    let now = crate::utils::local_clock();
-    let started = FIRST_PASS_DONE.swap(true, std::sync::atomic::Ordering::Relaxed);
-    let mut hosts = LAST_HOST.lock().ok();
-    for path in candidate_logs() {
-        let first_sight = !offsets.contains_key(&path);
-        // A file new since the first pass is read from its start (see above).
-        let from = match offsets.get(&path).copied() {
-            None if started => Some(0),
-            other => other,
-        };
-        let mut last_host = hosts
-            .as_mut()
-            .and_then(|h| h.get_or_insert_with(HashMap::new).get(&path).cloned());
-        let (next, tally) = scan(&path, from, now, &mut last_host);
-        if let (Some(h), Some(host)) = (hosts.as_mut(), last_host) {
-            h.get_or_insert_with(HashMap::new)
-                .insert(path.clone(), host);
-        }
-        offsets.insert(path.clone(), next);
-        if (!first_sight || started) && !tally.is_empty() {
-            out.push((path, tally));
-        }
-    }
-    out
-}
-
-/// Reads `path` from `from` (or from its end, when it has never been read) and
-/// tallies the complete lines appended since. Returns where the next read
-/// starts: just past the last complete line, so a line the logger's buffer
-/// flush split across two passes is read once, whole, on the second.
-///
-/// Pure in the sense that matters for a test: no static, one file, one answer.
-fn scan(
-    path: &Path,
-    from: Option<u64>,
-    now: Option<crate::utils::LocalClock>,
-    last_host: &mut Option<String>,
-) -> (u64, Tally) {
-    let Ok(len) = fs::metadata(path).map(|m| m.len()) else {
-        return (from.unwrap_or(0), Tally::default());
-    };
-    let Some(from) = from else {
-        // Never seen: history is not news.
-        return (len, Tally::default());
-    };
-    // Shrunk means rotated or restarted, and everything in it is new.
-    let mut start = if len < from { 0 } else { from };
-    if len == start {
-        return (len, Tally::default());
-    }
-    if len - start > MAX_READ {
-        start = len - MAX_READ;
-    }
-    let Ok(mut f) = File::open(path) else {
-        return (from, Tally::default());
-    };
-    if f.seek(SeekFrom::Start(start)).is_err() {
-        return (from, Tally::default());
-    }
-    let mut buf = Vec::with_capacity((len - start) as usize);
-    if f.take(len - start).read_to_end(&mut buf).is_err() {
-        return (from, Tally::default());
-    }
-    let Some(last_nl) = buf.iter().rposition(|b| *b == b'\n') else {
-        // No complete line yet. Wait for the rest - unless the slice is the
-        // whole read budget, which is one line nobody will ever finish.
-        if buf.len() as u64 >= MAX_READ {
-            return (len, Tally::default());
-        }
-        return (start, Tally::default());
-    };
-    let complete = &buf[..=last_nl];
-    (start + last_nl as u64 + 1, tally(complete, now, last_host))
-}
-
-/// Refusals and answers in a stretch of complete lines, with the newest of each
-/// placed against `now` by the line's own stamp.
-fn tally(
-    chunk: &[u8],
-    now: Option<crate::utils::LocalClock>,
-    last_host: &mut Option<String>,
-) -> Tally {
-    let mut out = Tally::default();
-    for line in chunk.split(|b| *b == b'\n') {
-        let named = url_host(line);
-        if named.is_some() {
-            *last_host = named.clone();
-        }
-        let refusals = count_refusals(line);
-        let answered = is_answer(line);
-        let dropped = is_stream_drop(line);
-        if refusals == 0 && !answered && !dropped {
-            continue;
-        }
-        let ago = now.and_then(|now| {
-            let text = String::from_utf8_lossy(line);
-            parse_stamp(&text)
-                .and_then(|at| age_secs(at, now))
-                .map(|s| Duration::from_secs(s as u64))
-        });
-        if refusals > 0 {
-            out.add(Tally {
-                refusals,
-                refused_ago: ago,
-                refused_host: last_host.clone(),
-                ..Tally::default()
-            });
-        }
-        if dropped {
-            out.add(Tally {
-                drops: 1,
-                dropped_ago: ago,
-                dropped_host: last_host.clone(),
-                ..Tally::default()
-            });
-        }
-        if answered {
-            out.add(Tally {
-                answers: 1,
-                answered_ago: ago,
-                answered_host: named.or_else(|| last_host.clone()),
-                ..Tally::default()
-            });
-        }
-    }
-    out
-}
-
-/// The host of a `URL: https://<host>/…` line, lower-cased; `None` for any
-/// other line or a host that is not one of ours.
-fn url_host(line: &[u8]) -> Option<String> {
-    const MARK: &[u8] = b"URL: https://";
-    let at = line.windows(MARK.len()).position(|w| w == MARK)? + MARK.len();
-    let rest = &line[at..];
-    let end = rest
-        .iter()
-        .position(|b| *b == b'/' || *b == b':' || b.is_ascii_whitespace())
-        .unwrap_or(rest.len());
-    let host = String::from_utf8_lossy(&rest[..end]).to_ascii_lowercase();
-    crate::proxy::is_gate_host(&host).then_some(host)
-}
-
-/// Whether a line is one failed generation attempt the connection died under.
-fn is_stream_drop(line: &[u8]) -> bool {
-    if !(contains_ci(line, DROP_ATTEMPT.as_bytes()) && contains_ci(line, DROP_FAILED.as_bytes())) {
-        return false;
-    }
-    contains_ci(line, DROP_STREAM_EOF.as_bytes())
-        || (contains_ci(line, ANSWER_CALL.as_bytes())
-            && (contains_ci(line, b"eof") || contains_ci(line, DROP_CLOSED_CONN.as_bytes())))
-}
 
 /// Whether a line is a model answer that started streaming.
 fn is_answer(line: &[u8]) -> bool {
@@ -1132,70 +855,6 @@ API Error: {Reason:UNSUPPORTED_LOCATION}
         assert_eq!(count_refusals(b""), 0);
     }
 
-    fn refusals_in(path: &Path, from: Option<u64>) -> (u64, usize) {
-        let (off, t) = scan(path, from, None, &mut None);
-        (off, t.refusals)
-    }
-
-    #[test]
-    fn history_is_not_news_but_what_is_appended_is() {
-        let path = temp_log("append");
-        append(&path, REFUSAL);
-        append(&path, REFUSAL);
-        // First sight: taken from the end, old refusals ignored.
-        let (off, hits) = refusals_in(&path, None);
-        assert_eq!(hits, 0);
-        assert_eq!(off, fs::metadata(&path).unwrap().len());
-        // Nothing appended: nothing found, offset unchanged.
-        assert_eq!(refusals_in(&path, Some(off)), (off, 0));
-        // Appended: found once, and only once.
-        append(&path, NOISE);
-        append(&path, REFUSAL);
-        let (off2, hits) = refusals_in(&path, Some(off));
-        assert_eq!(hits, 1);
-        assert_eq!(refusals_in(&path, Some(off2)), (off2, 0));
-        // A refusal split by a buffer flush: half in one pass, half in the next.
-        let cut = REFUSAL.len() / 2;
-        append(&path, &REFUSAL[..cut]);
-        let (off3, hits) = refusals_in(&path, Some(off2));
-        assert_eq!(hits, 0);
-        append(&path, &REFUSAL[cut..]);
-        let (off4, hits) = refusals_in(&path, Some(off3));
-        assert_eq!(hits, 1, "the halves must be read together");
-        assert_eq!(
-            refusals_in(&path, Some(off4)),
-            (off4, 0),
-            "and not counted again"
-        );
-        let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn a_file_that_shrank_is_read_from_the_start() {
-        let path = temp_log("shrink");
-        for _ in 0..8 {
-            append(&path, NOISE);
-        }
-        let (off, _) = refusals_in(&path, None);
-        assert!(
-            off > REFUSAL.len() as u64,
-            "the rewrite below must shrink it"
-        );
-        // The app restarted and truncated its log; the new content is news.
-        fs::write(&path, REFUSAL).expect("truncate");
-        let (off2, hits) = refusals_in(&path, Some(off));
-        assert_eq!(hits, 1);
-        assert_eq!(off2, REFUSAL.len() as u64);
-        let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn a_missing_file_changes_nothing() {
-        let path = temp_log("missing");
-        assert_eq!(refusals_in(&path, None), (0, 0));
-        assert_eq!(refusals_in(&path, Some(42)), (42, 0));
-    }
-
     /// The two real success lines, copied off this machine (Desktop wraps glog in
     /// its own prefix; the CLI writes bare glog). The refused turn in the IDE log
     /// of 2026-09-12 had no such line at all, and the calls that are logged on a
@@ -1212,39 +871,6 @@ API Error: {Reason:UNSUPPORTED_LOCATION}
         // The stamp of a success line is placed like a refusal's.
         assert!(parse_stamp(DESKTOP_OK).is_some());
         assert!(parse_stamp(CLI_OK).is_some());
-
-        let mut host = None;
-        let t = tally(
-            format!("{DESKTOP_OK}\n{LOAD}\n{REFUSAL}{CLI_OK}\n").as_bytes(),
-            Some(clock(9, 18, 18, 57, 0)),
-            &mut host,
-        );
-        assert_eq!(t.answers, 2);
-        assert_eq!(t.refusals, 1);
-        // Newest answer: the CLI line at 18:56:33, 27 s before the clock.
-        assert_eq!(t.answered_ago, Some(Duration::from_secs(27)));
-        // The refusal's stamp is 1 September, not today: unplaceable.
-        assert_eq!(t.refused_ago, None);
-        // Hosts: the answer names its own; the refusal takes the last URL line
-        // before it, the `loadCodeAssist` one.
-        assert_eq!(
-            t.answered_host.as_deref(),
-            Some("daily-cloudcode-pa.googleapis.com")
-        );
-        assert_eq!(
-            t.refused_host.as_deref(),
-            Some("daily-cloudcode-pa.googleapis.com")
-        );
-        assert_eq!(host.as_deref(), Some("daily-cloudcode-pa.googleapis.com"));
-        // A URL line for some other host is not a gate host and changes nothing.
-        assert_eq!(
-            url_host(b"I0918 x] URL: https://oauth2.googleapis.com/token"),
-            None
-        );
-        assert_eq!(
-            url_host(b"I0918 x] URL: https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist Trace"),
-            Some("cloudcode-pa.googleapis.com".to_string())
-        );
     }
 
     fn clock(month: u16, day: u16, h: u32, m: u32, s: u32) -> crate::utils::LocalClock {
@@ -1626,27 +1252,6 @@ API Error: {Reason:UNSUPPORTED_LOCATION}
         assert_eq!(u.count, 2);
         assert!(h.refused.is_none() && h.answered.is_none());
         let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn a_dead_connection_under_a_generation_attempt_is_a_drop() {
-        let a = b"Run: attempt 3 failed (request failed: Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse\": EOF), retrying in 11s";
-        let b = b"Run: attempt 1 failed (stream reading error: unexpected EOF), retrying in 4s";
-        assert!(is_stream_drop(a) && is_stream_drop(b));
-        // The final report repeats it without the attempt; the cache refreshers
-        // log EOF too and are not a generation.
-        assert!(!is_stream_drop(b"E1010 errorreport.go:224] generating and executing: request failed: Post \".../streamGenerateContent?alt=sse\": EOF"));
-        assert!(!is_stream_drop(b"W1010 cache.go:163] Failed to refresh cache in background: Post \".../fetchAvailableModels\": EOF"));
-        assert!(!is_stream_drop(b"Run: attempt 1 failed (INTERNAL (code 500): Internal error encountered.), retrying in 4s"));
-    }
-
-    /// Field log 2026-10-15: one EOF, then five retries each failing on the
-    /// client's own dead socket to our proxy - the streak must keep growing.
-    #[test]
-    fn a_closed_connection_retry_is_a_drop_too() {
-        let a = b"Run: attempt 2 failed (request failed: Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse\": write tcp 127.0.0.1:1834->127.0.0.1:53129: use of closed network connection), retrying in 6.9s";
-        assert!(is_stream_drop(a));
-        assert!(!is_stream_drop(b"Run: attempt 2 failed (request failed: Post \".../fetchAvailableModels\": write tcp 127.0.0.1:1->127.0.0.1:2: use of closed network connection), retrying in 4s"));
     }
 
     #[test]

@@ -54,7 +54,7 @@ pub fn revert_files(inst: &Path) -> Reverted {
             Err(e) => out.errors.push(format!("{label}: {e}")),
         }
     }
-    if let Err(e) = crate::restore_pristine_asar(&inst.join("resources")) {
+    if let Err(e) = crate::patch_install::restore_pristine_asar(&inst.join("resources")) {
         out.warnings.push(format!("app.asar не восстановлен: {e}"));
     }
     out
@@ -241,7 +241,7 @@ pub fn run_helper(arg: Option<String>) -> ! {
         println!("ERR\tне указана папка установки");
         std::process::exit(2);
     };
-    match crate::process_install(&inst) {
+    match crate::patch_install::process_install(&inst) {
         Ok(o) => {
             println!("OK\t{}", one_line(o.label));
             for w in o.warnings {
@@ -262,6 +262,7 @@ fn one_line(s: &str) -> String {
 
 /// The helper's lines back into a result. `Err("")` when it said nothing at
 /// all - pkexec refused before it ran - so the caller explains by exit code.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn parse_report(stdout: &str) -> Result<Elevated, String> {
     let mut done = Elevated::default();
     let mut ok = false;
@@ -349,6 +350,7 @@ pub fn run_unpatch_helper(arg: Option<String>) -> ! {
 }
 
 /// `None` unless the helper got as far as `DONE`: output cut short is a failure.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn parse_reverted(stdout: &str) -> Option<Reverted> {
     let mut done = Reverted::default();
     let mut finished = false;

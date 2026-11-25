@@ -269,10 +269,11 @@ pub fn log_fatal(message: &str) {
     log(&format!("fatal: {}", message));
 }
 
-/// The proxy shares the relay's log - it runs in the same process, and one file
-/// is what makes a resolve and the connection that followed it readable together.
-pub fn log_proxy(message: &str) {
-    log(&format!("proxy        {}", message));
+/// Socket-level notes from `net` (interface pinning), in the relay's own log so
+/// they read together with the resolves they affected.
+#[cfg(not(target_os = "windows"))]
+pub fn log_net(message: &str) {
+    log(&format!("net          {}", message));
 }
 
 /// Who answered a race that produced no substitution, and whether a reference
@@ -386,7 +387,7 @@ fn warm_forever() {
         gate::publish(gate::Now {
             route: Some("DNS"),
             forced_for: None,
-            stood_down: resolvers::tunnel_carries_client(),
+            stood_down: resolvers::vpn_is_active(),
             loopback: false,
             tunnel: net::tunnel_up(),
             vpn_exit: "",
@@ -448,7 +449,7 @@ fn serve_dns_forever() -> ! {
                 sock
             }
             Err(e) => {
-                let blocker = crate::portcheck::diagnose_on(addr, &e, crate::portcheck::Proto::Udp)
+                let blocker = crate::portcheck::diagnose_udp(addr, &e)
                     .blocker("dns", addr, &e);
                 // Once per distinct cause: the retry is a minute, the log is 64 KB.
                 if said.as_ref() != Some(&blocker) {

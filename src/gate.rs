@@ -73,7 +73,7 @@ pub struct Report {
 }
 
 /// Something on this machine that keeps part of the bypass from running, as the
-/// relay diagnosed it (`portcheck::diagnose`).
+/// relay diagnosed it (`portcheck::diagnose_udp`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Blocker {

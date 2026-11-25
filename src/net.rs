@@ -149,7 +149,7 @@ pub fn note_unpinned(e: &io::Error) {
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !SAID.swap(true, Ordering::Relaxed) {
         #[cfg(not(test))]
-        crate::dns_forwarder::log_proxy(&format!(
+        crate::dns_forwarder::log_net(&format!(
             "соединения не привязать к интерфейсу провайдера ({}) — идут по таблице маршрутов",
             e
         ));

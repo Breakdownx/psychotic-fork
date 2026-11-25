@@ -323,7 +323,7 @@ pub fn find_all_installs() -> Vec<PathBuf> {
 
 /// Which product an install directory is, for the progress line.
 ///
-/// A guess from the layout rather than the name `process_install` returns,
+/// A guess from the layout rather than the name `patch_install::process_install` returns,
 /// because the line is printed before the work starts - that is the whole point
 /// of it.
 /// Editor extension folders where the Antigravity extension for VS Code (and

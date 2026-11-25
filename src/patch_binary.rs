@@ -508,11 +508,6 @@ pub fn repatch_if_needed(bin_path: &Path) -> RepatchOutcome {
     repatch_with(bin_path, true)
 }
 
-#[cfg(windows)]
-pub(crate) fn repatch_before_launch(bin_path: &Path) -> RepatchOutcome {
-    repatch_with(bin_path, false)
-}
-
 fn repatch_with(bin_path: &Path, kill_locked: bool) -> RepatchOutcome {
     #[cfg(windows)]
     if crate::watchdog::updater_busy(&crate::watchdog::updater_dirs()) {
@@ -905,7 +900,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let other = path.clone();
         let worker = std::thread::spawn(move || {
-            tx.send(repatch_before_launch(&other)).unwrap();
+            tx.send(repatch_with(&other, false)).unwrap();
         });
         assert!(matches!(
             rx.recv_timeout(Duration::from_millis(150)),
@@ -918,7 +913,7 @@ mod tests {
             RepatchOutcome::Repatched(1)
         );
         worker.join().unwrap();
-        assert_eq!(repatch_before_launch(&path), RepatchOutcome::AlreadyPatched);
+        assert_eq!(repatch_with(&path, false), RepatchOutcome::AlreadyPatched);
         assert_eq!(fs::read(&path).unwrap(), b"..inexigible..https_proxy..");
         fs::remove_file(path).unwrap();
     }

@@ -34,7 +34,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::settings::Settings;
 use crate::utils::is_admin;
-use crate::{background, dns, endpoint, patch_binary, proxy};
+use crate::{background, dns, endpoint, legacy_proxy, patch_binary};
 
 mod protocol;
 
@@ -125,6 +125,17 @@ impl Ctx {
         let _ = self.events.send(Event::Busy(what.map(|s| s.to_string())));
         (self.wake)();
     }
+    /// Writes `settings.json`. A failed write never stops the action that
+    /// changed the setting, but it is said: otherwise the switch reads as saved
+    /// and quietly comes back after a restart.
+    fn save_settings(&self) {
+        if !self.settings.save() {
+            self.log(
+                Level::Warn,
+                "Не удалось сохранить настройки: изменение действует до перезапуска анлокера.",
+            );
+        }
+    }
 }
 
 /// True while a VPN measurement is out at a thread. One at a time: the watcher
@@ -160,7 +171,7 @@ fn run_worker(
             Cmd::SetTheme(mode) => {
                 if ctx.settings.theme != mode {
                     ctx.settings.theme = mode;
-                    ctx.settings.save();
+                    ctx.save_settings();
                 }
             }
             Cmd::UiReady => {
@@ -219,7 +230,7 @@ fn run_worker(
             Cmd::Set(cap, on) => {
                 ctx.busy(Some(cap.title()));
                 apply(&mut ctx, cap, on);
-                ctx.settings.save();
+                ctx.save_settings();
                 push_status(&mut ctx, scan_after(cap));
                 // Turning auto-patch on is asking for Antigravity to be patched;
                 // waiting for the watchdog's next poll would show the switch on
@@ -232,7 +243,7 @@ fn run_worker(
             Cmd::AddPath(p) => {
                 if !ctx.settings.manual_paths.contains(&p) {
                     ctx.settings.manual_paths.push(p);
-                    ctx.settings.save();
+                    ctx.save_settings();
                 }
                 #[cfg(windows)]
                 if is_admin()
@@ -260,18 +271,18 @@ fn run_worker(
             }
             Cmd::ForgetPath(p) => {
                 ctx.settings.manual_paths.retain(|x| x != &p);
-                ctx.settings.save();
+                ctx.save_settings();
                 push_status(&mut ctx, Scan::System);
             }
             Cmd::SetCustomDns(text) => {
                 set_custom_dns(&mut ctx, &text);
-                ctx.settings.save();
+                ctx.save_settings();
                 push_status(&mut ctx, Scan::Settings);
             }
             Cmd::EnableAll => {
                 ctx.busy(Some("Включаю"));
                 enable_all(&mut ctx);
-                ctx.settings.save();
+                ctx.save_settings();
                 push_status(&mut ctx, Scan::Deep);
                 ctx.busy(None);
             }
@@ -307,13 +318,13 @@ fn run_worker(
             Cmd::Repair => {
                 ctx.busy(Some("Чиню службу обхода"));
                 repair(&mut ctx);
-                ctx.settings.save();
+                ctx.save_settings();
                 push_status(&mut ctx, Scan::System);
                 ctx.busy(None);
             }
             Cmd::ReorderProviders(order) => {
                 ctx.settings.provider_order = order;
-                ctx.settings.save();
+                ctx.save_settings();
                 ctx.log(
                     Level::Info,
                     match first_enabled_provider(&ctx.settings) {
@@ -349,7 +360,7 @@ fn run_worker(
                         ),
                     );
                 }
-                ctx.settings.save();
+                ctx.save_settings();
                 // The switch is shown as flipped **now**: the file is written and
                 // the relay re-reads it within seconds. Rewriting the NRPT rules
                 // is PowerShell and takes a second or more, so it comes after,
@@ -408,7 +419,7 @@ fn retire_proxy_installation(ctx: &mut Ctx) -> Result<(), String> {
             }
         }
     }
-    endpoint::remove_proxy(&proxy::proxy_url(), &proxy::ca_cert_path().to_string_lossy())?;
+    endpoint::remove_proxy(&legacy_proxy::proxy_url(), &legacy_proxy::ca_cert_path().to_string_lossy())?;
     if had_proxy_env {
         ctx.log(Level::Info, "Перезапустите открытые клиенты Antigravity, чтобы они забыли прежний адрес прокси.");
     }
@@ -988,7 +999,7 @@ fn apply(ctx: &mut Ctx, cap: Cap, on: bool) {
         }
         (Cap::DnsRotation, on) => {
             ctx.settings.rotate_providers = on;
-            ctx.settings.save();
+            ctx.save_settings();
             reapply_dns_rules(ctx);
             ctx.log(
                 Level::Ok,
@@ -1099,7 +1110,7 @@ fn settle_decline(ctx: &mut Ctx) {
     }
     ctx.settings.patch_declined = !ctx.settings.client_patch && !background::is_watchdog_enabled();
     ctx.settings.decline_unrecorded = false;
-    ctx.settings.save();
+    ctx.save_settings();
 }
 
 /// Auto-patch from the window (D27): every install the last deep scan found
@@ -1205,7 +1216,7 @@ fn patch_found(ctx: &mut Ctx, found: Vec<(&'static str, PathBuf)>) -> bool {
         // What the switch falls back to before the next deep read, and what an
         // older build reading this file takes as the user's wish.
         ctx.settings.client_patch = true;
-        ctx.settings.save();
+        ctx.save_settings();
     }
     // Left raised: every caller re-reads the installs next and lowers it after.
     wrote
@@ -1254,7 +1265,7 @@ fn enable_client_patch(ctx: &mut Ctx) -> bool {
             }
             continue;
         }
-        match crate::process_install(inst) {
+        match crate::patch_install::process_install(inst) {
             Ok(outcome) => {
                 ok += 1;
                 ctx.log(
@@ -1287,7 +1298,7 @@ fn enable_client_patch(ctx: &mut Ctx) -> bool {
 
     // I39: the legacy CA comes out last, and `remove_legacy_ca` itself refuses
     // while the relay is still an older build.
-    crate::remove_legacy_ca_quiet();
+    legacy_proxy::remove_legacy_ca_quiet();
 
     ctx.log(Level::Ok, format!("Пропатчено установок: {}", ok));
     true
@@ -1609,7 +1620,7 @@ fn reapply_dns_rules(ctx: &mut Ctx) -> bool {
 }
 
 fn clear_legacy_proxy(ctx: &mut Ctx) {
-    let url = proxy::proxy_url();
+    let url = legacy_proxy::proxy_url();
     // I45 again: `remove_proxy` collects its own failures and joins them, so a
     // half-failed removal still takes off everything it can.
     match endpoint::remove_proxy(&url, "") {

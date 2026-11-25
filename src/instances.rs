@@ -21,7 +21,10 @@ fn is_window_name(name: &str, own: &str) -> bool {
         .is_some_and(|ver| ver.chars().next().is_some_and(|c| c.is_ascii_digit()))
 }
 
-/// Flags that make a process a service or helper, never a window.
+/// Flags that make a process a service or helper, never a window. The Windows
+/// walk goes by image name alone (`tasklist` shows no command line), so only the
+/// `/proc` walk asks this.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn is_service_args(args: &[String]) -> bool {
     args.iter().any(|a| {
         matches!(

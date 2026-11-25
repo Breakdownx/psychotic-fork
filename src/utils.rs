@@ -469,58 +469,14 @@ pub fn save_text_file(dir: &Path, name: &str, text: &str) -> Option<PathBuf> {
     std::fs::write(&path, bytes).ok().map(|()| path)
 }
 
-/// Opens the folder holding `path` with the file itself selected, so the user
-/// has it under the cursor rather than a path to go and find. Best effort: a
-/// machine with no shell at all simply gets nothing.
-pub fn reveal_in_explorer(path: &Path) {
-    #[cfg(target_os = "windows")]
-    {
-        // `/select,"<path>"` verbatim. `arg()` quotes the whole thing once the
-        // path has a space - `"/select,D:\Desktop\... отчёт.txt"` - which
-        // Explorer does not parse and answers by opening Documents. Explorer
-        // exits non-zero even when it worked, so the status is not asked for.
-        use std::os::windows::process::CommandExt;
-        let mut cmd = Command::new("explorer.exe");
-        cmd.raw_arg(format!("/select,\"{}\"", path.display()));
-        no_window(&mut cmd).spawn().ok();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // `open -R` opens Finder with the file selected.
-        Command::new("/usr/bin/open")
-            .arg("-R")
-            .arg(path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok();
-    }
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        if let Some(dir) = path.parent() {
-            Command::new("xdg-open")
-                .arg(dir)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .ok();
-        }
-    }
-}
-
 /// Starts this exe again through the shell's `runas` verb, i.e. behind a UAC
 /// prompt, and reports whether the new process was actually launched.
 ///
 /// There is no way to gain elevation in place: on Windows it is a property of
 /// the process token, fixed at creation. The window therefore cannot "become"
 /// admin — the honest button is one that starts over. A user who dismisses the
-/// UAC dialog gets `false` here and keeps the window they had.
-#[cfg(target_os = "windows")]
-pub fn relaunch_elevated() -> bool {
-    relaunch_elevated_with("")
-}
-
-/// The same, with `params` as the new process's command line (after the exe).
+/// UAC dialog gets `false` here and keeps the window they had. `params` is the
+/// new process's command line (after the exe).
 #[cfg(target_os = "windows")]
 pub fn relaunch_elevated_with(params: &str) -> bool {
     #[link(name = "shell32")]

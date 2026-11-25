@@ -117,8 +117,8 @@ fn base_tls_config() -> &'static ClientConfig {
         let mut cfg = ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
-        // Not shared with `proxy::upstream_config`, which pins http/1.1 for the
-        // relay's CONNECT hop. This one must offer h2 and nothing else: if a
+        // Not shared with `resolvers::probe_tls_config`, which offers http/1.1
+        // for the reachability probe. This one must offer h2 and nothing else: if a
         // server were to pick http/1.1 the frames below would be nonsense on the
         // wire, and failing in ALPN is the honest place to find that out.
         cfg.alpn_protocols = vec![b"h2".to_vec()];

@@ -12,6 +12,8 @@
 /// One running process whose environment still names the variable.
 #[derive(Debug, Clone)]
 pub struct Holder {
+    /// Read only by the test that checks this process never lists itself.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub pid: u32,
     /// Image name, e.g. `Antigravity.exe`.
     pub name: String,

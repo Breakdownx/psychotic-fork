@@ -137,9 +137,9 @@ fn remove_network() -> Vec<String> {
 fn remove_environment() -> Vec<String> {
     let mut errors = Vec::new();
     for result in [
-        crate::endpoint::remove_proxy(&crate::proxy::proxy_url(), ""),
+        crate::endpoint::remove_proxy(&crate::legacy_proxy::proxy_url(), ""),
         crate::endpoint::remove_cli(),
-        crate::endpoint::clear_node_ca(&crate::proxy::ca_cert_path().to_string_lossy()),
+        crate::endpoint::clear_node_ca(&crate::legacy_proxy::ca_cert_path().to_string_lossy()),
     ] {
         if let Err(e) = result {
             errors.push(e);

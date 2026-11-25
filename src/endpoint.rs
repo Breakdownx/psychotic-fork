@@ -129,7 +129,7 @@ fn remove_key(text: &str, key: &str) -> Result<String, String> {
 
 // `apply_ide`/`apply_cli` were deleted in 2.11.0 together with the policy they
 // served: the client is no longer pushed onto `daily-cloudcode-pa`, because the
-// host it picks for itself is routed now (see `main::process_install`). The two
+// host it picks for itself is routed now (see `patch_install::process_install`). The two
 // `remove_*` below stay, and are called from menu 1 as well as the undo paths -
 // a machine patched by an earlier build still carries the override, and nothing
 // else would ever take it back off.
@@ -309,11 +309,15 @@ pub fn remove_legacy_proxy_env(url: &str) -> Result<bool, String> {
     Ok(removed)
 }
 
+// The shell-file hook is Linux's (`remove_shell_hooks`); the tests run everywhere.
+#[cfg_attr(any(target_os = "windows", target_os = "macos"), allow(dead_code))]
 const SHELL_BEGIN: &str = "# >>> ag-unlocker >>>";
+#[cfg_attr(any(target_os = "windows", target_os = "macos"), allow(dead_code))]
 const SHELL_END: &str = "# <<< ag-unlocker <<<";
 
 /// `text` with our block replaced by `block` (or removed when `block` is None).
 /// Returns None when nothing would change.
+#[cfg_attr(any(target_os = "windows", target_os = "macos"), allow(dead_code))]
 fn rewrite_shell_block(text: &str, block: Option<&str>) -> Option<String> {
     let out = match (text.find(SHELL_BEGIN), text.find(SHELL_END)) {
         (Some(b), Some(e)) if e > b => {
@@ -456,22 +460,6 @@ pub fn remove_proxy(_url: &str, _ca_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `HTTPS_PROXY`/`https_proxy` as launchd hands them to GUI apps.
-#[cfg(target_os = "macos")]
-fn session_manager_proxy(ours: &str) -> Option<ForeignProxy> {
-    for name in [LEGACY_PROXY_ENV_VAR, "https_proxy"] {
-        if let Some(value) = crate::macos::getenv(name) {
-            if !is_ours_on_any_port(&value, ours) {
-                return Some(ForeignProxy {
-                    value,
-                    found_in: format!("{} в launchctl (окружение приложений)", name),
-                });
-            }
-        }
-    }
-    None
-}
-
 /// The process environment, then launchd's, then the login agent's plist.
 #[cfg(target_os = "macos")]
 fn current_env(name: &str) -> Option<String> {
@@ -482,204 +470,6 @@ fn current_env(name: &str) -> Option<String> {
         }
     }
     crate::macos::getenv(name).or_else(|| crate::macos::persisted_env(name))
-}
-
-/// A proxy the user set up themselves, which this tool must not get in front of.
-///
-/// Two places one can live. `HTTPS_PROXY` in the User or Machine environment is
-/// still what the patched language server reads *first* - the rename left that
-/// literal alone precisely so this keeps working - and `http.proxy` in
-/// Antigravity's own `settings.json` is what the Node side reads, with the
-/// language server's inheritance of it **unverified** (P25), so it is respected
-/// as a statement of intent either way. A value naming our own listener is not
-/// foreign (a leftover from a build that wrote `HTTPS_PROXY` itself); anything
-/// else is, and the answer says where it was found.
-///
-/// Since `2.11.0_5` this is the **only** thing keeping a user's own proxy in
-/// front of ours. The first draft assumed lookup order would do it - `HTTPS_PROXY`
-/// is the first argument of `getEnvAny` - and the probe measured the opposite:
-/// with both variables set the patched server takes ours
-/// (`patch_binary::PROXY_VAR_NEW`). So every caller that could write ours has to
-/// ask this first and remove ours when the answer is `Some`, and every one does.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ForeignProxy {
-    pub value: String,
-    pub found_in: String,
-}
-
-/// The user's own proxy, if they configured one anywhere the client would read.
-#[cfg(target_os = "windows")]
-pub fn foreign_proxy(ours: &str) -> Option<ForeignProxy> {
-    for scope in ["User", "Machine"] {
-        if let Some(value) = current_env_in(LEGACY_PROXY_ENV_VAR, scope) {
-            if !is_ours_on_any_port(&value, ours) {
-                return Some(ForeignProxy {
-                    value,
-                    found_in: format!("переменная среды {} ({})", LEGACY_PROXY_ENV_VAR, scope),
-                });
-            }
-        }
-    }
-    antigravity_proxy_setting(ours)
-}
-
-/// Linux has no User environment to read, so the same question is asked of the
-/// two places a session proxy can actually live: this process's own environment
-/// (which is the user's login session, since the unlocker is launched from it)
-/// and the systemd user manager, which is where a drop-in or an earlier build's
-/// `set-environment` ends up.
-///
-/// This used to be `antigravity_proxy_setting` alone - and until `_5` that was
-/// merely incomplete, because the old drop-in wrote `HTTPS_PROXY` too and which
-/// of the two won depended on how the app was launched. Now that ours outranks
-/// theirs inside the patched server (S42), silence here would mean a user behind
-/// a corporate proxy is routed into a loopback port that cannot reach anything -
-/// including their sign-in - with nothing on screen to say why.
-#[cfg(not(target_os = "windows"))]
-pub fn foreign_proxy(ours: &str) -> Option<ForeignProxy> {
-    for name in [LEGACY_PROXY_ENV_VAR, "https_proxy"] {
-        if let Ok(value) = std::env::var(name) {
-            let value = value.trim().to_string();
-            if !value.is_empty() && !is_ours_on_any_port(&value, ours) {
-                return Some(ForeignProxy {
-                    value,
-                    found_in: format!("переменная среды {}", name),
-                });
-            }
-        }
-    }
-    if let Some(found) = session_manager_proxy(ours) {
-        return Some(found);
-    }
-    antigravity_proxy_setting(ours)
-}
-
-/// `HTTPS_PROXY`/`https_proxy` as the systemd user manager holds it - what a
-/// `environment.d` drop-in or a `systemctl --user set-environment` leaves behind,
-/// and what every app launched from the desktop inherits.
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn session_manager_proxy(ours: &str) -> Option<ForeignProxy> {
-    use std::process::Command;
-    let out = Command::new("systemctl")
-        .args(["--user", "show-environment"])
-        .output()
-        .ok()?;
-    let env = String::from_utf8_lossy(&out.stdout);
-    for name in [LEGACY_PROXY_ENV_VAR, "https_proxy"] {
-        let prefix = format!("{}=", name);
-        let Some(value) = env
-            .lines()
-            .find_map(|l| l.strip_prefix(prefix.as_str()))
-            .map(str::trim)
-        else {
-            continue;
-        };
-        if !value.is_empty() && !is_ours_on_any_port(value, ours) {
-            return Some(ForeignProxy {
-                value: value.to_string(),
-                found_in: format!("{} в сессии systemd --user", name),
-            });
-        }
-    }
-    None
-}
-
-/// `http.proxy` from the `settings.json` of every Antigravity product under the
-/// user's profile. Product folders are matched by prefix, so a rebranded build
-/// and the Desktop app - which ships no loose `product.json` for
-/// `ide_settings_path` to read - are both covered.
-fn antigravity_proxy_setting(ours: &str) -> Option<ForeignProxy> {
-    let root = profile_root()?;
-    let entries = fs::read_dir(&root).ok()?;
-    for entry in entries.flatten().take(64) {
-        let name = entry.file_name();
-        if !name
-            .to_string_lossy()
-            .to_ascii_lowercase()
-            .starts_with("antigravity")
-        {
-            continue;
-        }
-        let path = entry.path().join("User").join("settings.json");
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Some(value) = proxy_setting_in(&text) {
-            if !is_ours_on_any_port(&value, ours) {
-                return Some(ForeignProxy {
-                    value,
-                    found_in: format!(
-                        "http.proxy в {}",
-                        crate::utils::mask_path(&path.to_string_lossy())
-                    ),
-                });
-            }
-        }
-    }
-    None
-}
-
-/// The `http.proxy` value in a settings file, if it is set to something.
-///
-/// Textual, like every other look at this file (I18), and line-wise so a
-/// commented-out setting - JSONC allows them, and a user trying things out leaves
-/// them - is not read as a live one. A URL contains `//` too, which is why the
-/// test is "the line starts with a comment", not "the line contains one".
-fn proxy_setting_in(text: &str) -> Option<String> {
-    let re = Regex::new(r#""http\.proxy"\s*:\s*"([^"]*)""#).ok()?;
-    text.lines()
-        .filter(|l| !l.trim_start().starts_with("//"))
-        .find_map(|l| {
-            re.captures(l)
-                .and_then(|c| c.get(1))
-                .map(|m| m.as_str().trim().to_string())
-        })
-        .filter(|v| !v.is_empty())
-}
-
-#[cfg(target_os = "windows")]
-fn profile_root() -> Option<PathBuf> {
-    std::env::var("APPDATA").ok().map(PathBuf::from)
-}
-
-/// macOS: Electron keeps the profile under `~/Library/Application Support`.
-#[cfg(target_os = "macos")]
-fn profile_root() -> Option<PathBuf> {
-    Some(crate::macos::application_support())
-}
-
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn profile_root() -> Option<PathBuf> {
-    match std::env::var("XDG_CONFIG_HOME") {
-        Ok(x) if !x.is_empty() => Some(PathBuf::from(x)),
-        _ => std::env::var("HOME")
-            .ok()
-            .map(|h| PathBuf::from(h).join(".config")),
-    }
-}
-
-/// Takes our proxy variable off. `Ok(true)` when there was one and it was
-/// removed, `Ok(false)` when there was nothing of ours.
-///
-/// The watchdog's primitive: it must never touch a value the user set. That is
-/// now true by the *name* - `PROXY_ENV_VAR` is written by nothing else - where it
-/// used to rest on matching the value under a shared name.
-pub fn remove_proxy_if_ours(url: &str, ca_path: &str) -> Result<bool, String> {
-    if current_env(PROXY_ENV_VAR).is_none() {
-        // Nothing of ours under our own name; a legacy pair may still be there.
-        return remove_legacy_proxy_env(url);
-    }
-    remove_proxy(url, ca_path).map(|()| true)
-}
-
-#[cfg(target_os = "windows")]
-fn current_env_in(name: &str, scope: &str) -> Option<String> {
-    let out = powershell(&format!(
-        "[Environment]::GetEnvironmentVariable('{}','{}')",
-        name, scope
-    ))?;
-    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!value.is_empty()).then_some(value)
 }
 
 /// Whether an `HTTPS_PROXY` value is one this tool wrote.
@@ -694,12 +484,12 @@ fn current_env_in(name: &str, scope: &str) -> Option<String> {
 /// listens on: a proxy the user chose for themselves never names it. Their own
 /// value is left alone, which matters more than removing ours.
 /// Ours at all: the listener's current address, or the default port it had
-/// before the relay had to move it (`proxy::port`). For "is it someone else's"
+/// before the relay had to move it (`legacy_proxy::port`). For "is it someone else's"
 /// and "may we take it off" - a value naming the old port is still ours to
 /// remove, never a foreign proxy to stand aside for. "Is it ours *and still
 /// current*" is `is_our_proxy_value`.
 fn is_ours_on_any_port(value: &str, url: &str) -> bool {
-    is_our_proxy_value(value, url) || is_our_proxy_value(value, &crate::proxy::default_url())
+    is_our_proxy_value(value, url) || is_our_proxy_value(value, &crate::legacy_proxy::default_url())
 }
 
 fn is_our_proxy_value(value: &str, url: &str) -> bool {
@@ -822,7 +612,7 @@ pub fn proxy_env_value() -> Option<String> {
 /// something the user configured themselves.
 #[allow(dead_code)]
 pub fn proxy_env_is_ours() -> bool {
-    let ours = crate::proxy::proxy_url();
+    let ours = crate::legacy_proxy::proxy_url();
     proxy_env_value().is_some_and(|v| is_our_proxy_value(&v, &ours))
 }
 
@@ -842,41 +632,6 @@ mod tests {
         let removed = rewrite_shell_block(&added, None).unwrap();
         assert_eq!(removed, format!("{user}\n"));
         assert_eq!(rewrite_shell_block("", None), None);
-    }
-
-    /// The user's own `http.proxy` is read as intent: set means set, empty or
-    /// commented out means nothing, and a URL's own `//` is not a comment.
-    #[test]
-    fn a_proxy_setting_is_found_only_when_it_is_live_and_non_empty() {
-        assert_eq!(
-            proxy_setting_in(r#"{ "http.proxy": "http://10.0.0.1:3128", "x": 1 }"#).as_deref(),
-            Some("http://10.0.0.1:3128")
-        );
-        assert_eq!(
-            proxy_setting_in("{\n    \"http.proxy\" : \"socks5://h:1080\"\n}").as_deref(),
-            Some("socks5://h:1080")
-        );
-        assert_eq!(proxy_setting_in(r#"{ "http.proxy": "" }"#), None);
-        assert_eq!(
-            proxy_setting_in(r#"{ "http.proxyStrictSSL": "yes" }"#),
-            None
-        );
-        assert_eq!(
-            proxy_setting_in("{\n    // \"http.proxy\": \"http://old:3128\",\n    \"a\": 1\n}"),
-            None,
-            "a commented-out setting is not a setting"
-        );
-        assert_eq!(proxy_setting_in("{}"), None);
-    }
-
-    /// Our own listener in the settings file is not a foreign proxy.
-    #[test]
-    fn our_own_listener_in_settings_is_not_foreign() {
-        let ours = "http://127.0.0.1:53129";
-        let value = proxy_setting_in(r#"{ "http.proxy": "http://127.0.0.1:53129/" }"#).unwrap();
-        assert!(is_our_proxy_value(&value, ours));
-        let value = proxy_setting_in(r#"{ "http.proxy": "http://127.0.0.1:8080" }"#).unwrap();
-        assert!(!is_our_proxy_value(&value, ours));
     }
 
     /// The bug users hit: a revert that left `HTTPS_PROXY` naming a port it had

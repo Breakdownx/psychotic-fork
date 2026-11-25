@@ -161,7 +161,8 @@ impl Settings {
     }
 
     /// Best-effort write. A failure here must never block an action the user
-    /// asked for, so it is reported as a bool and normally ignored.
+    /// asked for, so it is reported as a bool rather than an error to stop on;
+    /// the worker logs it (`ops::Ctx::save_settings`).
     pub fn save(&self) -> bool {
         let Some(path) = path() else { return false };
         if let Some(dir) = path.parent() {

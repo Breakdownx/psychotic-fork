@@ -39,6 +39,9 @@ use rustls::ClientConnection;
 /// as_a_nameserver`.
 pub enum Transport {
     /// Plain DNS on UDP:53, queried over a socket pinned to the ISP interface.
+    /// No provider in `PROVIDERS` uses it at the moment; the variant stays so a
+    /// plain resolver can be listed again without touching the query paths.
+    #[allow(dead_code)]
     Udp,
     /// DNS-over-HTTPS. Reachable only through the relay, never by Windows.
     Doh(&'static crate::doh::Endpoint),
@@ -829,6 +832,22 @@ fn remember_liveness(addr: IpAddr, alive: bool) {
     }
 }
 
+/// Webpki roots, http/1.1 ALPN: what the reachability probe's handshake offers.
+fn probe_tls_config() -> std::sync::Arc<rustls::ClientConfig> {
+    static CFG: std::sync::OnceLock<std::sync::Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
+    CFG.get_or_init(|| {
+        let roots = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        let mut cfg = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        std::sync::Arc::new(cfg)
+    })
+    .clone()
+}
+
 /// Whether `addr` will actually serve `sni` inside `budget`.
 ///
 /// TCP alone is not the question the client asks. Measured within one minute on
@@ -860,7 +879,7 @@ fn reachable(addr: IpAddr, budget: Duration, sni: Option<&str>) -> bool {
     let Ok(server) = ServerName::try_from(name.to_string()) else {
         return false;
     };
-    let Ok(mut conn) = ClientConnection::new(crate::proxy::probe_config(), server) else {
+    let Ok(mut conn) = ClientConnection::new(probe_tls_config(), server) else {
         return false;
     };
     sock.set_read_timeout(Some(budget)).ok();
@@ -1402,118 +1421,13 @@ enum Heat {
 /// that never learns the answer keeps substituting exactly as before.
 static VPN_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Until when substitution is forced on regardless of the tunnel verdict.
-///
-/// Set by the region-400 watch (`ls_log`): the client was measured inside a
-/// tunnel, the relay stood down for it, and the gate answered 400 anyway - so
-/// the tunnel exits somewhere blocked and "the VPN decides" (D13) is the wrong
-/// call for this tunnel. Substituting then sends the client to a provider's
-/// proxy *through* the tunnel, which still lifts the gate. It is a window, not
-/// a flag: the tunnel may be replaced by a permitted one, and when the window
-/// closes the stand-down logic is back in charge until the log says otherwise.
-static FORCE_SUBSTITUTE_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
-
 pub fn set_vpn_active(active: bool) {
     VPN_ACTIVE.store(active, Ordering::Relaxed);
 }
 
-/// Whether the relay is standing down for a tunnel right now. False while
-/// substitution is forced, whatever the tunnel verdict says.
+/// Whether the relay is standing down for a tunnel right now.
 pub fn vpn_is_active() -> bool {
-    VPN_ACTIVE.load(Ordering::Relaxed) && !substitution_forced()
-}
-
-/// The raw tunnel verdict, ignoring any force. For the log line that explains
-/// why the relay is doing what it does.
-pub fn tunnel_carries_client() -> bool {
     VPN_ACTIVE.load(Ordering::Relaxed)
-}
-
-pub fn force_substitution(for_how_long: Duration) {
-    if let Ok(mut until) = FORCE_SUBSTITUTE_UNTIL.lock() {
-        *until = Some(Instant::now() + for_how_long);
-    }
-}
-
-pub fn substitution_forced() -> bool {
-    substitution_forced_for().is_some()
-}
-
-/// How much of that window is left, for the record the window reads (`gate`).
-/// `None` when nothing is forced.
-pub fn substitution_forced_for() -> Option<Duration> {
-    FORCE_SUBSTITUTE_UNTIL
-        .lock()
-        .ok()
-        .and_then(|u| *u)
-        .and_then(|until| until.checked_duration_since(Instant::now()))
-}
-
-/// The verdict of the answer most recently handed out for each name, by the
-/// client path or the warm loop alike. What the proxy asks when deciding
-/// whether a direct tunnel to that name has anything substituted to reach.
-static SERVED: Mutex<Option<HashMap<String, (Verdict, Instant)>>> = Mutex::new(None);
-
-/// A served verdict older than this is forgotten: the warm loop refreshes every
-/// routed name every 15 s, so a name unseen for minutes is one nobody asks for.
-const SERVED_TTL: Duration = Duration::from_secs(10 * 60);
-
-fn note_served(name: &str, verdict: Verdict) {
-    if let Ok(mut guard) = SERVED.lock() {
-        guard.get_or_insert_with(HashMap::new).insert(
-            name.trim_end_matches('.').to_ascii_lowercase(),
-            (verdict, Instant::now()),
-        );
-    }
-}
-
-/// What the relay last answered `name` with, if it answered recently.
-pub fn served_verdict(name: &str) -> Option<Verdict> {
-    let guard = SERVED.lock().ok()?;
-    let (verdict, at) = guard
-        .as_ref()?
-        .get(&name.trim_end_matches('.').to_ascii_lowercase())?;
-    (at.elapsed() < SERVED_TTL).then_some(*verdict)
-}
-
-/// Drops every remembered choice and cached answer for `names`, so the next
-/// query - the warm loop's, within 15 s - races the providers from scratch.
-///
-/// The region-400 watch calls this: an answer that led to the gate is not one
-/// to keep serving for the rest of its TTL, whoever gave it.
-pub fn forget_names(names: &[&str]) {
-    let wanted: Vec<String> = names
-        .iter()
-        .map(|n| n.trim_end_matches('.').to_ascii_lowercase())
-        .collect();
-    // The choice key carries the name as the client spelt it, so it is compared
-    // case-folded rather than looked up.
-    if let Ok(mut guard) = CHOICE.lock() {
-        if let Some(map) = guard.as_mut() {
-            map.retain(|(name, _), _| {
-                !wanted.contains(&name.trim_end_matches('.').to_ascii_lowercase())
-            });
-        }
-    }
-    // Expired, not removed. The entry's *shape* - the client's own query bytes -
-    // is what the warm loop replays (`warm_queries`), and a removed shape means
-    // the next client query of that shape misses the cache and pays for a cold
-    // race. Zero life and a non-substituted verdict take it out of both the
-    // fresh path and the stale-substituted preference, and let the next answer
-    // overwrite it whatever its verdict.
-    if let Ok(mut guard) = ANSWERS.lock() {
-        if let Some(map) = guard.as_mut() {
-            for (key, answer) in map.iter_mut() {
-                let hit = dns_client::question_name(key)
-                    .map(|q| q.trim_end_matches('.').to_ascii_lowercase())
-                    .is_some_and(|q| wanted.contains(&q));
-                if hit {
-                    answer.good_for = Duration::ZERO;
-                    answer.verdict = Verdict::Unknown;
-                }
-            }
-        }
-    }
 }
 
 /// Answers a routed name the way the tunnel's own resolver would, and says so.
@@ -1606,23 +1520,7 @@ fn one_shot_floor(provider: &Provider, budget: Duration) -> Duration {
 /// the round trip untouched. A cached reply is the same bytes with the client's
 /// transaction id and its TTLs counted down.
 pub fn resolve_best(query: &[u8], if_index: u32) -> Option<(Vec<u8>, &'static str, Verdict)> {
-    let hit = cached_answer(query, false, true).or_else(|| resolve_upstream(query, if_index, true));
-    note_served_a(query, &hit);
-    hit
-}
-
-/// Records the verdict of an **A** answer for its name. Only A: Windows asks
-/// AAAA for every name too, and the providers answer that with Google's own
-/// IPv6 (a passthrough by construction, which is why `dns.rs` re-orders the
-/// prefix policy). Keyed by name alone, the AAAA verdict overwrote the A one
-/// and took the direct route out of the table on alternate warm passes.
-fn note_served_a(query: &[u8], hit: &Option<(Vec<u8>, &'static str, Verdict)>) {
-    if dns_client::question_type(query) != Some(QTYPE_A) {
-        return;
-    }
-    if let (Some(name), Some((_, _, verdict))) = (dns_client::question_name(query), hit) {
-        note_served(&name, *verdict);
-    }
+    cached_answer(query, false, true).or_else(|| resolve_upstream(query, if_index, true))
 }
 
 /// Asks upstream whatever is cached, and stores the result.
@@ -1630,9 +1528,7 @@ fn note_served_a(query: &[u8], hit: &Option<(Vec<u8>, &'static str, Verdict)>) {
 /// This is what the warm loop calls: going through `resolve_best` would just
 /// hand back the entry it exists to replace.
 pub fn refresh(query: &[u8], if_index: u32) -> Option<(Vec<u8>, &'static str, Verdict)> {
-    let hit = resolve_upstream(query, if_index, false);
-    note_served_a(query, &hit);
-    hit
+    resolve_upstream(query, if_index, false)
 }
 
 /// Asks every provider and every reference resolver at once and returns the
@@ -2023,97 +1919,6 @@ pub fn resolve_a_best(name: &str, if_index: u32) -> Option<(Vec<Ipv4Addr>, &'sta
     Some((addrs, provider, verdict))
 }
 
-/// Candidates, not a DNS verdict: even when today's race returns genuine
-/// Google (or nothing), another provider's known proxy may carry this SNI.
-/// Every address MUST pass the host-specific TLS/HTTP probe before use.
-pub fn dns_proxy_candidates(name: &str, if_index: u32) -> Vec<Ipv4Addr> {
-    ensure_proxy_sets_learned(if_index);
-    let mut out = match resolve_a_best(name, if_index) {
-        Some((ips, provider, Verdict::Substituted)) if !provider_disabled(provider) => ips,
-        _ => Vec::new(),
-    };
-    for (idx, provider) in PROVIDERS.iter().enumerate() {
-        if provider_disabled(provider.name) {
-            continue;
-        }
-        for addr in known_proxy_addrs(idx) {
-            if let IpAddr::V4(ip) = addr {
-                if !out.contains(&ip) {
-                    out.push(ip);
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Genuine Google for `name`, as the routing table's own path resolves it: the
-/// reference resolvers asked over the **default route**, i.e. through the
-/// user's VPN when one holds it, so the edge is the one that tunnel's exit is
-/// served from. What the `Vpn` route connects to.
-///
-/// Cached for a minute: it is asked once per gate connection on that route, and
-/// Google's edge for a name does not move on that scale.
-pub fn genuine_a(name: &str) -> Vec<Ipv4Addr> {
-    const TTL: Duration = Duration::from_secs(60);
-    const BUDGET: Duration = Duration::from_secs(2);
-    static CACHE: Mutex<Option<HashMap<String, (Vec<Ipv4Addr>, Instant)>>> = Mutex::new(None);
-
-    let key = name.trim_end_matches('.').to_ascii_lowercase();
-    if let Ok(guard) = CACHE.lock() {
-        if let Some((addrs, at)) = guard.as_ref().and_then(|m| m.get(&key)) {
-            if at.elapsed() < TTL && !addrs.is_empty() {
-                return addrs.clone();
-            }
-        }
-    }
-    let query = dns_client::build_query(&key, 0x7A7A);
-    let mut out: Vec<Ipv4Addr> = Vec::new();
-    for server in REFERENCE_V4 {
-        let Ok(ip) = server.parse::<Ipv4Addr>() else {
-            continue;
-        };
-        if let Ok(reply) = dns_client::query_raw_via(&query, ip, 0, BUDGET) {
-            out = dns_client::answer_addrs(&reply)
-                .into_iter()
-                .filter_map(|a| match a {
-                    IpAddr::V4(v4) if is_public_v4(v4) => Some(v4),
-                    _ => None,
-                })
-                .collect();
-            if !out.is_empty() {
-                break;
-            }
-        }
-    }
-    if !out.is_empty() {
-        if let Ok(mut guard) = CACHE.lock() {
-            guard
-                .get_or_insert_with(HashMap::new)
-                .insert(key, (out.clone(), Instant::now()));
-        }
-    }
-    out
-}
-
-/// An address Google could actually be at. Not the DPI's stubs, and not the
-/// ranges a tunnel's "fake IP" DNS hands out (198.18.0.0/15) or anything
-/// private: connecting there hands the name back to whatever answered it, and
-/// that can resolve it through us again.
-fn is_public_v4(v4: Ipv4Addr) -> bool {
-    let o = v4.octets();
-    !(REFERENCE_STUBS.contains(&v4)
-        || v4.is_private()
-        || v4.is_loopback()
-        || v4.is_link_local()
-        || v4.is_unspecified()
-        || v4.is_broadcast()
-        || o[0] == 0
-        || (o[0] == 100 && (64..128).contains(&o[1]))
-        || (o[0] == 198 && (18..20).contains(&o[1]))
-        || o[0] >= 224)
-}
-
 /// Index of the first reply with exactly `want`, in rotated provider order.
 fn pick(replies: &[(usize, Vec<u8>)], reference: &[IpAddr], want: Verdict) -> Option<usize> {
     let start = ROTATION.load(Ordering::Relaxed);
@@ -2179,64 +1984,6 @@ mod tests {
 
     fn v4(s: &str) -> IpAddr {
         IpAddr::V4(s.parse().unwrap())
-    }
-
-    #[test]
-    fn served_verdicts_are_kept_per_name_case_folded() {
-        note_served("Daily-Cloudcode-PA.googleapis.com.", Verdict::Substituted);
-        assert_eq!(
-            served_verdict("daily-cloudcode-pa.googleapis.com"),
-            Some(Verdict::Substituted)
-        );
-        assert_eq!(served_verdict("nobody.asked.example"), None);
-    }
-
-    #[test]
-    fn forgetting_a_name_drops_its_choice_and_its_answers() {
-        let name = "forget-me.example";
-        remember_choice((name.to_string(), QTYPE_A), 0, Verdict::Substituted);
-        assert!(cached_choice(&(name.to_string(), QTYPE_A)).is_some());
-        let query = dns_client::build_query(name, 0x1111);
-        let mut reply = query.clone();
-        reply[2] = 0x81;
-        reply[3] = 0x80;
-        reply[7] = 1;
-        reply.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 10, 0, 0, 1]);
-        remember_answer(&query, &reply, "test", Verdict::Substituted, true);
-        assert!(cached_answer(&query, false, false).is_some());
-
-        forget_names(&["FORGET-ME.example"]);
-        assert!(cached_choice(&(name.to_string(), QTYPE_A)).is_none());
-        assert!(cached_answer(&query, false, false).is_none());
-        assert!(
-            cached_answer(&query, true, false).is_none(),
-            "not served as a stale substitution either"
-        );
-        // The shape survives for the warm loop to replay.
-        let shapes = warm_queries(&[name]);
-        assert!(
-            shapes.iter().any(|q| answer_key(q) == answer_key(&query)),
-            "the client's query shape must still be warmed"
-        );
-    }
-
-    #[test]
-    fn only_an_a_answer_records_a_served_verdict() {
-        let name = "served-a.example";
-        let a = dns_client::build_query(name, 1);
-        let mut aaaa = a.clone();
-        let n = aaaa.len();
-        aaaa[n - 3] = 28; // qtype AAAA
-        let hit = Some((Vec::new(), "test", Verdict::Substituted));
-        note_served_a(&a, &hit);
-        assert_eq!(served_verdict(name), Some(Verdict::Substituted));
-        let hit = Some((Vec::new(), "test", Verdict::Passthrough));
-        note_served_a(&aaaa, &hit);
-        assert_eq!(
-            served_verdict(name),
-            Some(Verdict::Substituted),
-            "an AAAA passthrough must not overwrite the A verdict"
-        );
     }
 
     fn udp_providers() -> Vec<&'static Provider> {
@@ -2407,26 +2154,11 @@ mod tests {
     /// The flag defaults to "no tunnel", which is the behaviour every existing
     /// machine already has: a relay that never learns the answer keeps
     /// substituting exactly as before rather than quietly standing down.
-    ///
-    /// The region-400 override lives in the same test because it shares this
-    /// flag: while forced, the relay substitutes even though the tunnel verdict
-    /// says stand down, and the force expires on its own.
     #[test]
     fn the_vpn_flag_defaults_to_off_and_round_trips() {
         assert!(!vpn_is_active(), "должно быть выключено по умолчанию");
         set_vpn_active(true);
         assert!(vpn_is_active());
-
-        force_substitution(Duration::from_millis(80));
-        assert!(substitution_forced());
-        assert!(!vpn_is_active(), "forced: the tunnel no longer decides");
-        assert!(tunnel_carries_client(), "the raw verdict is still readable");
-        std::thread::sleep(Duration::from_millis(120));
-        assert!(!substitution_forced());
-        assert!(
-            vpn_is_active(),
-            "the window closed; the tunnel decides again"
-        );
 
         set_vpn_active(false);
         assert!(!vpn_is_active());
