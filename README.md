@@ -1,27 +1,32 @@
-# Antigravity Unlocker 2.35.1 для Mac
+# Psychotic Antigravity Unlock
 
-Сборка для Mac с Apple Silicon и Intel, macOS 13 или новее.
+![Обложка проекта Psychotic Antigravity Unlock](assets/psychotic-antigravity-unlock.png)
 
-## Установка
+Форк Antigravity Unlocker для Mac. Приложение находит установленные Antigravity Desktop, IDE и CLI, показывает состояние патча для каждого клиента и может восстанавливать его после обновлений. Встроенный локальный HTTP-прокси и настройка своего HTTP-прокси удалены. Своим VPN вы управляете отдельно.
 
-Скачайте [`Psychotic_AG_Fork.dmg`](https://github.com/Breakdownx/psychotic-fork/releases/latest/download/Psychotic_AG_Fork.dmg) из [последнего релиза](https://github.com/Breakdownx/psychotic-fork/releases/latest), откройте его, перетащите **Antigravity Unlocker** на ярлык **Applications** и откройте приложение из «Программ». На вкладке **«Обзор»** нажмите **«Проверить»**, чтобы увидеть состояние установленных клиентов.
+## Установка на Mac
 
-Первый запуск, право «Управление приложениями», запуск из Терминала и запасной вариант с `Запустить.command` описаны в [macos/README.md](macos/README.md). Тот же текст лежит внутри образа.
+1. Скачайте [Psychotic_AG_Fork.dmg](https://github.com/Breakdownx/psychotic-fork/releases/latest/download/Psychotic_AG_Fork.dmg).
+2. Откройте образ, перетащите **Antigravity Unlocker** на ярлык **Applications** и запустите приложение из «Программ».
+3. На вкладке **«Обзор»** нажмите **«Проверить»**. У Desktop, IDE и CLI отдельные строки с результатом. После обновления запустите нужный клиент и проверьте привычное действие.
 
-## Сборка
+Образ рассчитан на Apple Silicon и Intel, начиная с macOS 13. В том же релизе есть ZIP с приложением и архив для запуска из Терминала. [Все файлы релиза](https://github.com/Breakdownx/psychotic-fork/releases/latest)
 
-```sh
-macos/build.sh
-```
+## Диагностика
 
-Скрипт собирает универсальный бинарник (Apple Silicon и Intel; `--arm64-only` — быстрее, только Apple Silicon) и кладёт в локальную папку `release/` (в git её нет) образ `Psychotic_AG_Fork.dmg`, ZIP с приложением и запасную папку с `.tar.gz`. CI ([.github/workflows/macos.yml](.github/workflows/macos.yml)) прогоняет тесты на каждый push, а по тегу `v*` запускает этот же скрипт и публикует релиз с этими файлами. Тег должен совпадать с версией в `Cargo.toml`.
-
-Подпись Developer ID и нотарификация описаны в [docs/обновление-antigravity.md](docs/обновление-antigravity.md).
-
-## Проверка без изменений
+Чтобы получить отчёт без запуска окна, выполните в Терминале команду
 
 ```sh
 "/Applications/Antigravity Unlocker.app/Contents/MacOS/ag_unlocker" --status
 ```
 
-Печатает найденные установки, состояние патча и фоновой службы; ничего не меняет.
+Отчёт показывает состояние файлов каждой установки, настройку автопатча и состояние фоновой службы. Отчёт можно получить без изменения настроек и бинарников клиентов. На macOS для проверки права записи она может создать временный файл внутри проверяемого приложения.
+
+## Документация
+
+- [Руководство для macOS](macos/README.md) — форматы поставки, первый запуск, разрешения и коды выхода `--status`.
+- [После обновления Antigravity](docs/обновление-antigravity.md) — значения статусов, журналы и возврат к штатной установке.
+- [Руководство для Linux](linux/README.md) — запуск бета-порта из исходников или готового Linux-комплекта.
+- [Сборка и выпуск для Mac](docs/обновление-antigravity.md#сборка-и-выпуск-для-mac) — локальная сборка, подпись и GitHub Actions.
+
+Исходный проект — [Antigravity Unlocker](https://github.com/confeden/Antigravity). Условия использования приведены в [лицензии](LICENSE).
