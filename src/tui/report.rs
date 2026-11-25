@@ -1,14 +1,4 @@
-//! «Сохранить отчёт»: everything needed to say why Antigravity is or is not
-//! answering, in one paste.
-//!
-//! «Поставил анлокер, но не помогает что-то» plus a screenshot of a green card
-//! was undiagnosable (G50): the one fact that mattered - the client was not
-//! going through us at all - was nowhere on screen. This puts every fact the
-//! window and the relay have into plain text.
-//!
-//! Nothing secret goes in: paths are masked the way the window shows them, the
-//! built-in exits are named only as «встроенный выход» (I46), and the relay's
-//! log - which is included - never names an address of ours in the first place.
+//! Formats the terminal diagnostic report, including masked paths and recent relay logs.
 
 use std::fmt::Write as _;
 

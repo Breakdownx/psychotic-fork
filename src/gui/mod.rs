@@ -7,24 +7,19 @@
 mod icon;
 mod main_view;
 pub(crate) mod renderer;
-pub(crate) mod report;
-pub(crate) mod status;
 mod theme;
 mod widgets;
 
 use eframe::egui;
 use std::sync::mpsc::{channel, Receiver};
 
-use crate::ops::{self, Cmd, Event, Level, Status, Worker};
+use crate::journal::Journal;
+use crate::ops::{self, Cmd, Event, Status, Worker};
 use crate::settings::Settings;
 use crate::update::{self, ReleaseInfo};
 
 const WIN_W: f32 = 680.0;
 const WIN_H: f32 = 435.0;
-
-/// How many log lines are kept. The window can stay open for days; an unbounded
-/// Vec of every line a re-patch loop produced is a slow leak.
-const LOG_LIMIT: usize = 400;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Screen {
@@ -43,7 +38,7 @@ pub struct App {
     events: Receiver<Event>,
     status: Option<Status>,
 
-    log: Vec<(Level, String)>,
+    log: Journal,
     /// Ctrl+A over the journal. Our own, because egui's label selection is per
     /// galley and the journal is one label per line.
     log_all_selected: bool,
@@ -86,7 +81,7 @@ impl App {
             worker,
             events,
             status: None,
-            log: Vec::new(),
+            log: Journal::default(),
             log_all_selected: false,
             busy: None,
             main_view: main_view::ViewState::default(),
@@ -125,12 +120,7 @@ impl App {
         }
         while let Ok(ev) = self.events.try_recv() {
             match ev {
-                Event::Log(level, line) => {
-                    if self.log.len() >= LOG_LIMIT {
-                        self.log.remove(0);
-                    }
-                    self.log.push((level, line));
-                }
+                Event::Log(level, line) => self.log.push(level, line),
                 Event::Status(status) => self.status = Some(*status),
                 Event::Busy(what) => self.busy = what,
                 Event::ProxySaved(..) => {}

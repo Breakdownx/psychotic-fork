@@ -1,10 +1,4 @@
-//! The one line at the top of the window: is it working, and if not, what now.
-//!
-//! Everything below it is mechanism - which DNS answers, which route, which
-//! switch - and a user who is not a programmer should not have to read any of
-//! it to know whether Antigravity will answer. So the window's whole verdict is
-//! derived here, as a pure function of facts the window already has, and it is
-//! tested cell by cell: this is the sentence a user acts on.
+//! Builds the terminal status card from the latest status and watcher snapshots.
 //!
 //! The rules that shaped it, each one a bug that shipped before:
 //!
@@ -175,8 +169,6 @@ impl Facts {
     /// Read off a status snapshot and the gate watcher's last view, which is
     /// `gate_age` old: the watcher sends an age measured at its own tick and
     /// then stays quiet while nothing changes, so the front end ages its copy.
-    /// Both front ends (window and terminal) call this, so they cannot answer
-    /// differently.
     pub fn read(s: &Status, gate: &View, gate_age: Duration) -> Facts {
         let aged = |ago: Duration| ago + gate_age;
         // Newest over twelve hours, so an old refusal still outranks an older
@@ -285,7 +277,7 @@ pub const BYPASS_TEXT: (&str, &str) = (
      перестал работать — с VPN и без.",
 );
 
-/// What a switch is called and what it does, in both front ends.
+/// Labels and descriptions for the switches in the terminal.
 pub fn switch_text(cap: Cap) -> (&'static str, &'static str) {
     match cap {
         Cap::ClientPatch => (

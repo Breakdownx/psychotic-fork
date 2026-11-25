@@ -8,7 +8,7 @@ pub fn run(manual: &[PathBuf]) -> Vec<String> {
     if let Err(e) = stop_services() {
         return vec![e];
     }
-    let mut targets = crate::find_all_installs();
+    let mut targets = crate::installs::find_all_installs();
     targets.extend_from_slice(manual);
     targets = targets
         .into_iter()

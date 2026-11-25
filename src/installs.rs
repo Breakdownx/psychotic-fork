@@ -1,0 +1,420 @@
+//! Locate and identify local Antigravity installations on each supported platform.
+
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
+use std::time::Duration;
+
+#[cfg(target_os = "macos")]
+use crate::macos;
+#[cfg(target_os = "windows")]
+use crate::utils;
+
+pub fn clean_input_path(input: &str) -> String {
+    let mut s = input.trim();
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+        if s.len() >= 2 {
+            s = &s[1..s.len() - 1];
+        }
+    }
+    s = s.trim();
+    s = s.trim_matches('"').trim_matches('\'').trim();
+    s.to_string()
+}
+
+fn is_install_root(path: &Path) -> bool {
+    if !path.exists() || !path.is_dir() {
+        return false;
+    }
+
+    let path_str = path.to_string_lossy().to_lowercase();
+    if path_str == "c:\\windows"
+        || path_str.starts_with("c:\\windows\\")
+        || path_str.contains("\\windows\\system32")
+        || path_str.contains("\\windows\\syswow64")
+    {
+        return false;
+    }
+
+    #[cfg(target_os = "macos")]
+    let resources = macos::resources_dir(path);
+    #[cfg(not(target_os = "macos"))]
+    let resources = path.join("resources");
+    if resources.exists() && resources.is_dir() {
+        if resources.join("app.asar").exists()
+            || resources.join("app").exists()
+            || resources.join("bin").exists()
+        {
+            return true;
+        }
+    }
+    // `is_file`, not `exists`: `%LOCALAPPDATA%\agy` is the CLI's *directory*, and
+    // an `exists()` check there made the parent-walk treat `%LOCALAPPDATA%` itself
+    // as an install root. A launcher/CLI is always a file.
+    if path.join("agy.exe").is_file() || path.join("agy").is_file() {
+        return true;
+    }
+    if path.join("Antigravity.exe").is_file()
+        || path.join("Antigravity IDE.exe").is_file()
+        || path.join("antigravity.exe").is_file()
+    {
+        return true;
+    }
+    // Linux/macOS launcher names (no extension).
+    #[cfg(not(target_os = "windows"))]
+    if path.join("antigravity").is_file()
+        || path.join("Antigravity").is_file()
+        || path.join("antigravity-ide").is_file()
+    {
+        return true;
+    }
+    if path.join("out").join("main.js").exists() || path.join("dist").join("main.js").exists() {
+        return true;
+    }
+    false
+}
+
+pub fn resolve_install_root(raw: &Path) -> Option<PathBuf> {
+    let mut p = raw.to_path_buf();
+
+    if p.is_file() {
+        if let Some(parent) = p.parent() {
+            p = parent.to_path_buf();
+        }
+    }
+
+    if !p.exists() {
+        return None;
+    }
+
+    if is_install_root(&p) {
+        return Some(p);
+    }
+
+    let mut current = p.clone();
+    for _ in 0..4 {
+        if let Some(parent) = current.parent() {
+            if is_install_root(parent) {
+                return Some(parent.to_path_buf());
+            }
+            current = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+
+    let subfolder_candidates = [
+        "Antigravity IDE",
+        "Antigravity",
+        "agy",
+        "Programs\\Antigravity IDE",
+        "Programs\\Antigravity",
+        "resources",
+        // macOS: the `.app` itself was picked; the root is its `Contents`.
+        "Contents",
+    ];
+    for sub in subfolder_candidates {
+        let candidate = p.join(sub);
+        if is_install_root(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+/// The fixed install locations, before any resolution. Kept separate from
+/// `find_all_installs` so the watchdog can enumerate installs without the
+/// PowerShell registry scan - spawning PowerShell on a timer inside the
+/// background relay would be both wasteful and a stray-window risk.
+#[cfg(target_os = "windows")]
+fn standard_install_candidates() -> Vec<PathBuf> {
+    let local_appdata = env::var("LOCALAPPDATA").unwrap_or_default();
+    let prog_files = env::var("PROGRAMFILES").unwrap_or_default();
+    let prog_files_x86 = env::var("PROGRAMFILES(X86)").unwrap_or_default();
+
+    vec![
+        PathBuf::from(&local_appdata)
+            .join("Programs")
+            .join("Antigravity"),
+        PathBuf::from(&local_appdata)
+            .join("Programs")
+            .join("Antigravity IDE"),
+        PathBuf::from(&prog_files).join("Antigravity"),
+        PathBuf::from(&prog_files).join("Antigravity IDE"),
+        PathBuf::from(&prog_files_x86).join("Antigravity"),
+        PathBuf::from(&prog_files_x86).join("Antigravity IDE"),
+        PathBuf::from(&local_appdata).join("Antigravity"),
+        PathBuf::from(&local_appdata).join("Antigravity IDE"),
+        PathBuf::from(&local_appdata).join("agy").join("bin"),
+        PathBuf::from(&local_appdata).join("agy"),
+        // IDE 2.6.0 no longer bundles its language server: the extension
+        // downloads the `agy` backend here at first start.
+        PathBuf::from(env::var("USERPROFILE").unwrap_or_default())
+            .join(".gemini")
+            .join("bin"),
+    ]
+}
+
+/// The Linux equivalents. Antigravity ships as an Electron/VS Code fork, which on
+/// Linux lands in one of the system prefixes (`.deb` → `/usr/share` or `/opt`;
+/// tarball → `/opt` or under the home dir) with the language server at
+/// `resources/app/extensions/antigravity/bin/`. The CLI keeps a per-user `agy`
+/// tree. Anything not covered here is reachable through menu 2 (manual path),
+/// which is why this list can stay short rather than scanning the whole disk.
+#[cfg(not(target_os = "windows"))]
+fn standard_install_candidates() -> Vec<PathBuf> {
+    let home = env::var("HOME").unwrap_or_default();
+    let mut v: Vec<PathBuf> = Vec::new();
+    // System-wide install roots, both capitalisations the packaging might use.
+    for base in ["/opt", "/usr/share", "/usr/lib", "/usr/local/share"] {
+        for name in [
+            "Antigravity",
+            "Antigravity IDE",
+            "antigravity",
+            "antigravity-ide",
+        ] {
+            v.push(PathBuf::from(base).join(name));
+        }
+    }
+    // Per-user installs (tarball / AppImage extraction / `agy` CLI).
+    if !home.is_empty() {
+        let h = PathBuf::from(&home);
+        v.push(h.join(".local/share/Antigravity"));
+        v.push(h.join(".local/share/Antigravity IDE"));
+        v.push(h.join("Antigravity"));
+        v.push(h.join("Antigravity IDE"));
+        // The `agy` CLI: measured at `~/.local/bin/agy` on a real install, so its
+        // bin dir is an install root in its own right (binary_targets scopes to
+        // `agy`/`language_server*`, so a shared bin dir patches only ours).
+        v.push(h.join(".local/bin"));
+        v.push(h.join(".agy/bin"));
+        v.push(h.join(".agy"));
+        v.push(h.join(".local/share/agy/bin"));
+        v.push(h.join(".gemini/bin"));
+    }
+    // macOS: `.app` bundles in /Applications and ~/Applications; the install
+    // root is the bundle's `Contents` (S80).
+    #[cfg(target_os = "macos")]
+    v.extend(macos::app_bundles());
+    v
+}
+
+/// The directory holding the `agy` CLI, found via PATH first and then the common
+/// per-user/system bin dirs. Linux only; returns the dir (an install root once
+/// `agy` is in it), not the file.
+#[cfg(not(target_os = "windows"))]
+fn find_agy_dir() -> Option<PathBuf> {
+    let home = env::var("HOME").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(path) = env::var("PATH") {
+        dirs.extend(path.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
+    }
+    dirs.push(PathBuf::from(format!("{}/.local/bin", home)));
+    dirs.push(PathBuf::from(format!("{}/.agy/bin", home)));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    dirs.push(PathBuf::from("/usr/bin"));
+    // Never a snap dir: `/snap/bin/agy` is a read-only wrapper, not the real
+    // binary - patching it always fails (no signature, read-only mount) and only
+    // produces a scary "signature not found". A snap CLI is out of scope; the
+    // native `~/.local/bin/agy` is what gets patched.
+    dirs.into_iter()
+        .find(|d| !is_snap_path(d) && d.join("agy").is_file())
+}
+
+/// True for a path served by snapd's read-only squashfs mounts, which cannot be
+/// patched in place.
+#[cfg(not(target_os = "windows"))]
+fn is_snap_path(p: &Path) -> bool {
+    p.starts_with("/snap") || p.starts_with("/var/lib/snapd")
+}
+
+/// Scans the usual Linux prefixes for any `*antigravity*` directory, so an
+/// install whose name is not hardcoded is still found - the analogue of the
+/// Windows registry scan. Returns candidate roots to be resolved.
+#[cfg(not(target_os = "windows"))]
+fn scan_antigravity_dirs() -> Vec<PathBuf> {
+    let home = env::var("HOME").unwrap_or_default();
+    let mut out = Vec::new();
+    let bases = [
+        "/opt".to_string(),
+        "/usr/share".to_string(),
+        "/usr/lib".to_string(),
+        "/usr/local/share".to_string(),
+        format!("{}/.local/share", home),
+    ];
+    for base in bases {
+        if let Ok(entries) = fs::read_dir(&base) {
+            for e in entries.flatten() {
+                let p = e.path();
+                let hit = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.to_lowercase().contains("antigravity"));
+                if hit && p.is_dir() {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Resolves the standard install locations only - filesystem checks, no
+/// PowerShell. This is what the watchdog polls.
+pub fn discover_installs_fast() -> Vec<PathBuf> {
+    let mut installs = Vec::new();
+    for cand in standard_install_candidates() {
+        if let Some(resolved) = resolve_install_root(&cand) {
+            if !installs.contains(&resolved) {
+                installs.push(resolved);
+            }
+        }
+    }
+    installs
+}
+
+pub fn find_all_installs() -> Vec<PathBuf> {
+    let mut installs = Vec::new();
+    let mut candidates = standard_install_candidates();
+
+    // Linux: augment the fixed list with a scan of the usual prefixes for
+    // *antigravity* dirs and the `agy` CLI's bin dir, so an install we did not
+    // hardcode (or a CLI that lives on PATH) is still found.
+    #[cfg(not(target_os = "windows"))]
+    {
+        candidates.extend(scan_antigravity_dirs());
+        if let Some(agy_dir) = find_agy_dir() {
+            candidates.push(agy_dir);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let ps_cmd = r#"Get-ItemProperty HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*, HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*, HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* | Where-Object { $_.DisplayName -like '*Antigravity*' -or $_.DisplayName -like '*agy*' -or $_.InstallLocation -like '*Antigravity*' } | ForEach-Object { $_.InstallLocation }"#;
+        if let Some(output) = utils::powershell_within(ps_cmd, Duration::from_secs(20)) {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let cleaned = clean_input_path(line);
+                    if !cleaned.is_empty() {
+                        candidates.push(PathBuf::from(&cleaned));
+                    }
+                }
+            }
+        }
+    }
+
+    for cand in candidates {
+        if let Some(resolved) = resolve_install_root(&cand) {
+            if !installs.contains(&resolved) {
+                installs.push(resolved);
+            }
+        }
+    }
+    // Never a snap: its squashfs is read-only, so a resolved install (or a symlink
+    // that resolved into one) could only ever fail to patch. Drop it here as well
+    // as in the CLI search, so nothing snap-served reaches the results.
+    #[cfg(not(target_os = "windows"))]
+    installs.retain(|p| !is_snap_path(p));
+    installs
+}
+
+/// Which product an install directory is, for the progress line.
+///
+/// A guess from the layout rather than the name `process_install` returns,
+/// because the line is printed before the work starts - that is the whole point
+/// of it.
+/// Editor extension folders where the Antigravity extension for VS Code (and
+/// its forks, which install from the same marketplace package) lives. The
+/// extension downloads its backend to `~/.gemini/bin`, the folder discovery
+/// already patches, so the folder is that editor's install in the window.
+const VSCODE_EXTENSION_DIRS: [&str; 5] = [
+    ".vscode",
+    ".vscode-insiders",
+    ".vscode-oss",
+    ".cursor",
+    ".windsurf",
+];
+
+/// Whether the Antigravity extension is installed in any VS Code-family editor.
+pub fn vscode_extension_installed() -> bool {
+    let Some(home) = env::var_os("USERPROFILE").or_else(|| env::var_os("HOME")) else {
+        return false;
+    };
+    let home = PathBuf::from(home);
+    VSCODE_EXTENSION_DIRS.iter().any(|d| {
+        fs::read_dir(home.join(d).join("extensions"))
+            .map(|entries| {
+                entries.flatten().any(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .starts_with("google.google-antigravity-")
+                })
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// `~/.gemini/bin`: the backend of the VS Code extension and of IDE 2.6.0.
+fn is_gemini_bin(install: &Path) -> bool {
+    install.file_name().is_some_and(|n| n == "bin")
+        && install
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|n| n == ".gemini")
+}
+
+pub fn install_label(install: &Path) -> &'static str {
+    if is_gemini_bin(install) && vscode_extension_installed() {
+        "Antigravity для VS Code"
+    } else if install.join("agy.exe").is_file() || install.join("agy").is_file() {
+        "Antigravity CLI"
+    } else if install.join("Antigravity IDE.exe").exists()
+        || install.join("resources").join("app").join("out").exists()
+        || install.join("Resources").join("app").join("out").exists()
+    {
+        "Antigravity IDE"
+    } else {
+        "Antigravity 2.0"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: `%LOCALAPPDATA%` holds an `agy` *directory* (the CLI's folder).
+    /// An `exists()` check matched that directory, so the parent-walk in
+    /// `resolve_install_root` treated `%LOCALAPPDATA%` itself as an install root and
+    /// menu 1 reported `%LOCALAPPDATA% - Компоненты приложения не найдены`. A
+    /// launcher/CLI is a *file*, so a directory named `agy` must not qualify.
+    #[test]
+    fn a_directory_named_agy_does_not_make_its_parent_an_install() {
+        let base = env::temp_dir().join("ag_isroot_dir_test");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("agy").join("bin")).unwrap();
+        assert!(
+            !is_install_root(&base),
+            "a subdirectory named agy must not make its parent an install root"
+        );
+        // The empty agy dir is not a root either, so resolving a path under it must
+        // not walk up to `base`.
+        assert_ne!(resolve_install_root(&base.join("agy")), Some(base.clone()));
+        fs::remove_dir_all(&base).ok();
+    }
+
+    /// The real CLI directory - one that actually holds the `agy` binary as a
+    /// file - still resolves as an install root.
+    #[test]
+    fn a_directory_holding_the_agy_binary_is_an_install() {
+        let base = env::temp_dir().join("ag_isroot_file_test");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join("agy"), b"binary").unwrap();
+        assert!(is_install_root(&base));
+        fs::remove_dir_all(&base).ok();
+    }
+}

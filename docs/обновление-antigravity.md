@@ -11,7 +11,7 @@
 1. Дождись завершения обновления Antigravity. Открой анлокер и на вкладке **«Обзор»** нажми **«Проверить»**. Дождись окончания проверки.
 2. Найди отдельную строку для каждого нужного клиента. Если установка отсутствует, открой **«Установки»**, нажми значок папки с подсказкой **«Указать путь вручную»**, укажи папку нужной установки и повтори проверку в «Обзоре».
 3. Для каждой строки со статусом **«Патч применён»** запусти именно этот обновлённый клиент и выполни привычное действие. Например, для Desktop или IDE отправь обычный запрос и дождись ответа. CLI проверь отдельно, если им пользуешься.
-4. Считай обновление проверенным для конкретного клиента, когда статус подтверждён, клиент запускается и действие завершается успешно. Если шаг сорвался, запиши название клиента, версии Antigravity и анлокера, ОС, время, действие и точный текст ошибки. [Статусы и кнопки интерфейса](../src/gui/main_view.rs)
+4. Считай обновление проверенным для конкретного клиента, когда статус подтверждён, клиент запускается и действие завершается успешно. Если шаг сорвался, запиши название клиента, версии Antigravity и анлокера, ОС, время, действие и точный текст ошибки. [Статусы и кнопки интерфейса](../src/gui/main_view/overview.rs)
 
 ### Как читать результат
 
@@ -36,7 +36,7 @@ shasum -a 256 "/полный/путь/к/файлу"
 
 ### Где сохранить журнал
 
-**«Журнал» → «Скопировать журнал»** сохраняет в буфер записи текущего сеанса. Вставь их в файл до закрытия анлокера или деактивации. При следующем запуске журнал окна начинается заново. [Журнал окна](../src/gui/mod.rs)
+**«Журнал» → «Скопировать журнал»** сохраняет в буфер записи текущего сеанса. Вставь их в файл до закрытия анлокера или деактивации. При следующем запуске журнал окна начинается заново. [Журнал окна](../src/gui/main_view/journal.rs)
 
 Если обновление шло при закрытом окне, проверь отдельный файл фоновой службы и скопируй строки за время сбоя.
 
@@ -75,7 +75,7 @@ shasum -a 256 "/полный/путь/к/файлу"
 
 1. Сохрани работу в Antigravity, скопируй журнал окна и нужные записи фоновой службы. Полная деактивация закрывает Antigravity, снимает патчи, отключает обход и удаляет фоновые службы и данные анлокера. Версия самого Antigravity при этом остаётся установленной.
 2. Открой **«Установки» → «Полная деактивация»**. Прочитай диалог и нажми **«Деактивировать»**. В Windows для этого нужны права администратора.
-3. Дождись сообщения **«Анлокер полностью деактивирован»**, закрой анлокер и проверь запуск штатного клиента. Если появилось **«Деактивация не завершена»**, скопируй новые строки журнала, устрани указанную причину и повтори деактивацию. [Диалог](../src/gui/main_view.rs) · [Обработка результата](../src/ops.rs)
+3. Дождись сообщения **«Анлокер полностью деактивирован»**, закрой анлокер и проверь запуск штатного клиента. Если появилось **«Деактивация не завершена»**, скопируй новые строки журнала, устрани указанную причину и повтори деактивацию. [Диалог](../src/gui/main_view/installations.rs) · [Обработка результата](../src/ops.rs)
 
 ---
 
@@ -113,7 +113,7 @@ Desktop больше не патчится. Определяется по мар
 `./ipcHandlers` и отсутствию старых `_handleAuthErrorResponse` / `getUserStatus` /
 `"AUTH_SUCCESS"` / `"SET_INELIGIBLE"`. Если Google снова поменяет компоновку shell —
 проверять и, возможно, чинить эту функцию и `process_install`
-([src/main.rs:424](../src/main.rs)).
+([src/main.rs](../src/main.rs)).
 
 ### 4. Регекс патча IDE `out/main.js`
 
@@ -135,18 +135,118 @@ regex перестаёт матчиться → `SignatureMissing`.
 
 ---
 
-## Приложение. Выпуск новой версии анлокера
+## Приложение. Выпуск Antigravity Unlocker для Mac
 
-Эти шаги нужны сопровождающему, когда изменения анлокера готовы к выпуску. Версия 2.35.1 распространяется локальным архивом. В комплект macOS входит [инструкция по запуску](../macos/README.md). Пользователю достаточно распакованной папки.
+Для Finder и отправки через Telegram подготовь ZIP с одним объектом в корне — `Antigravity Unlocker.app`. Внутри приложения находятся бинарник, иконка и метаданные. Получатель распаковывает ZIP в Finder и открывает приложение двойным щелчком. Сборка ниже предназначена для **Apple Silicon (arm64), macOS 13 и новее**. Для Intel потребуется отдельный бинарник x86_64 или Universal.
 
-1. **Сверь версию.** Для локального релизного скрипта полная версия задаётся в `VERSION`. Например, для `2.9.1_14` скрипт запишет в `Cargo.toml` базовую версию `2.9.1`, а в имени локального архива сохранит суффикс `_14`. Если базовая версия менялась, проверь также запись пакета `ag_unlocker` в `Cargo.lock`. Для самостоятельной сборки в CI версия берётся из закоммиченного `Cargo.toml`. [Скрипт сборки](../build_rust.py) · [Cargo.toml](../Cargo.toml) · [Cargo.lock](../Cargo.lock)
-2. **Запусти тесты** из корня репозитория командой `cargo test --locked` после синхронизации манифеста и lock-файла. Для macOS выбери один из маршрутов ниже.
-3. **Проверь архив от текущей сборки.** Посмотри его содержимое через `tar -tzf "путь/к/архиву.tar.gz"`, распакуй в пустую папку и убедись, что внутри есть `ag_unlocker`, `Запустить.command` и `README.md`. На Mac с Apple Silicon проверь подпись распакованного файла командой `codesign --verify --strict ./ag_unlocker` из папки с бинарником. Запусти приложение через `Запустить.command` и сверь отображаемую версию с ожидаемой для этого маршрута сборки.
+### 1. Собери бинарник и создай приложение
 
-| Маршрут | Что проверить |
-|---|---|
-| Локальный `build_rust.py` на Windows | Для сборки macOS скрипту нужны WSL, `cargo-zigbuild`, Rust target `aarch64-apple-darwin` и macOS SDK. Если шаг пропущен или завершился ошибкой, ранее созданный архив может всё ещё лежать в `release/`. Найди в выводе этого запуска сообщение об успешной упаковке и соответствующий файл `release/AG_<полная версия>_macos.tar.gz`. |
-| Нативная сборка на Mac с Apple Silicon | Собери `cargo build --locked --release --bin ag_unlocker --target aarch64-apple-darwin`. Подпиши собранный бинарник ad hoc. В папку комплекта положи подписанный `ag_unlocker`, исполняемый `Запустить.command` и `macos/README.md` под именем `README.md`. Упакуй папку целиком в `.tar.gz` и проверь архив по шагу 3. Пример тех же операций есть в ручном workflow **macOS (arm64)**. Он использует версию Cargo и для `2.35.1` даёт имя `AG_2.35_1_macos.tar.gz`. Имя текущего локального комплекта — `AG_2.35.1_macos.tar.gz`. [Workflow macOS](../.github/workflows/macos.yml) |
+Выполняй блоки из корня проекта в одном сеансе Bash на Mac с Xcode и Rust. В примере используется версия `2.35.1`. Перед новым выпуском сверь базовую версию пакета `ag_unlocker` в `Cargo.toml` и `Cargo.lock`. Если полная версия — `2.35.1_2`, укажи её в `release_version`, оставь `base_version=2.35.1` и задай отдельный числовой номер сборки в `bundle_build`. Полная версия передаётся при компиляции и видна в заголовке окна. Флаг `--version` печатает базовую версию Cargo. [Cargo.toml](../Cargo.toml) · [Выбор отображаемой версии](../src/update.rs)
+
+```bash
+set -eu
+release_version=2.35.1
+base_version=2.35.1
+bundle_build=2.35.1
+arch=aarch64-apple-darwin
+work=$(mktemp -d)
+app="$work/Antigravity Unlocker.app"
+export AG_FULL_VERSION="$release_version"
+export MACOSX_DEPLOYMENT_TARGET=13.0
+
+cargo test --locked
+cargo build --locked --release --bin ag_unlocker --target "$arch" --target-dir target
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+install -m 755 "target/$arch/release/ag_unlocker" "$app/Contents/MacOS/ag_unlocker"
+sips -s format icns icon.ico --out "$app/Contents/Resources/AppIcon.icns"
+```
+
+Создай `Info.plist` до подписи. Finder запускает `Contents/MacOS/ag_unlocker` напрямую.
+
+```bash
+python3 - "$app/Contents/Info.plist" "$base_version" "$bundle_build" <<'PY'
+import plistlib
+import sys
+
+path, version, build = sys.argv[1:]
+with open(path, "wb") as out:
+    plistlib.dump({
+        "CFBundlePackageType": "APPL",
+        "CFBundleInfoDictionaryVersion": "6.0",
+        "CFBundleIdentifier": "local.antigravity.unlocker",
+        "CFBundleDevelopmentRegion": "ru",
+        "CFBundleName": "Antigravity Unlocker",
+        "CFBundleDisplayName": "Antigravity Unlocker",
+        "CFBundleExecutable": "ag_unlocker",
+        "CFBundleIconFile": "AppIcon.icns",
+        "CFBundleShortVersionString": version,
+        "CFBundleVersion": build,
+        "LSApplicationCategoryType": "public.app-category.utilities",
+        "LSMinimumSystemVersion": "13.0",
+        "NSHighResolutionCapable": True,
+        "NSPrincipalClass": "NSApplication",
+    }, out)
+PY
+plutil -lint "$app/Contents/Info.plist"
+lipo "$app/Contents/MacOS/ag_unlocker" -verify_arch arm64
+```
+
+### 2. Выбери способ подписи
+
+**Локальная проверка.** Подпись ad hoc позволяет проверить целостность собранного приложения. Архив помечается `app-local`. Таким способом собран `AG_2.35.1_macOS_arm64_app-local.zip`: проверка целостности прошла, Gatekeeper отклонил распакованное приложение при проверке распространения.
+
+```bash
+codesign --force --sign - --options runtime "$app"
+zip_name="AG_${release_version}_macOS_arm64_app-local.zip"
+```
+
+**Рассылка пользователям.** Подготовь сертификат **Developer ID Application** с закрытым ключом и профиль учётных данных для `notarytool` в связке ключей. Найди точное имя сертификата через `security find-identity -v -p codesigning`. Подставь имя своего сертификата и профиля в блок ниже. Если сертификат или профиль недоступен, сохрани сборку как `app-local`. Команда `submit` отправляет промежуточный ZIP в службу нотарификации Apple. [Процесс нотарификации Apple](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
+
+```bash
+identity="Developer ID Application: ИМЯ (TEAMID)"
+notary_profile="ИМЯ_ПРОФИЛЯ"
+codesign --force --sign "$identity" --options runtime --timestamp "$app"
+ditto -c -k --keepParent "$app" "$work/submit.zip"
+xcrun notarytool submit "$work/submit.zip" --keychain-profile "$notary_profile" \
+  --wait --no-progress --output-format plist > "$work/notary.plist"
+plutil -p "$work/notary.plist"
+test "$(plutil -extract status raw -o - "$work/notary.plist")" = Accepted
+xcrun stapler staple "$app"
+zip_name="AG_${release_version}_macOS_arm64_app.zip"
+```
+
+При статусе `Invalid` возьми `id` заявки из `notary.plist` и посмотри причину через `xcrun notarytool log ID --keychain-profile ИМЯ_ПРОФИЛЯ`. После исправления заново подпиши приложение и отправь его на проверку. Финальный ZIP создаётся после прикрепления билета Apple.
+
+### 3. Проверь ZIP, который получит пользователь
+
+Для обоих вариантов подписи упакуй приложение и распакуй архив в пустой каталог. Проверки выполняй на извлечённой копии.
+
+```bash
+ditto -c -k --keepParent "$app" "$work/$zip_name"
+unzip -tq "$work/$zip_name"
+ditto -x -k "$work/$zip_name" "$work/unpacked"
+checked="$work/unpacked/Antigravity Unlocker.app"
+test -x "$checked/Contents/MacOS/ag_unlocker"
+plutil -lint "$checked/Contents/Info.plist"
+codesign --verify --deep --strict --verbose=2 "$checked"
+```
+
+Для **версии на рассылку** выполни ещё две проверки. Обе команды должны завершиться успешно, а `spctl` — показать `accepted`.
+
+```bash
+xcrun stapler validate "$checked"
+spctl --assess --type execute --verbose=4 "$checked"
+```
+
+Сохрани проверенный ZIP и выведи его SHA-256. Перед рассылкой передай этот архив на другой Mac с Apple Silicon, распакуй в Finder и проверь первый запуск двойным щелчком и версию в окне. При результате Gatekeeper `rejected` вернись к подписи и нотарификации. [Проверка программ в macOS](https://support.apple.com/ru-ru/102445)
+
+```bash
+mkdir -p release
+install -m 644 "$work/$zip_name" "release/$zip_name"
+shasum -a 256 "release/$zip_name"
+```
+
+**Прежний комплект с `Запустить.command`.** [build_rust.py](../build_rust.py) на Windows через WSL и [ручной workflow macOS](../.github/workflows/macos.yml) по-прежнему создают папку и `.tar.gz` с бинарником, скриптом запуска и [README](../macos/README.md). Для версии 2.35.1 Python формирует `AG_2.35.1_macos.tar.gz`, workflow — `AG_2.35_1_macos.tar.gz`. Для кросс-сборки через WSL нужны cargo-zigbuild, целевая платформа Rust и macOS SDK. Шаг macOS может быть пропущен, поэтому проверяй вывод текущей сборки. Для ZIP с приложением используй шаги 1–3 выше.
 
 ---
 
@@ -158,4 +258,5 @@ regex перестаёт матчиться → `SignatureMissing`.
 - [ ] Если результат не подтверждён, сохранён точный статус каждой затронутой установки. Отдельно отмечены отложенная операция, ошибка чтения или записи либо сообщение о незнакомой сборке.
 - [ ] При сбое сохранены версии, ОС, время, точная ошибка и записи текущего сеанса или фоновой службы.
 - [ ] Если потребовалась деактивация, журналы сохранены заранее, получено подтверждение завершения и проверен запуск штатного клиента.
-- [ ] Если выпускается анлокер, сверены полная и базовая версии, пройдены тесты и проверен распакованный архив именно этого запуска.
+- [ ] Перед выпуском сверены полная и базовая версии, пройдены тесты и проверена подпись приложения из готового ZIP.
+- [ ] Перед рассылкой проверены билет нотарификации, результат Gatekeeper `accepted` и первый запуск из Finder на другом Mac с Apple Silicon.

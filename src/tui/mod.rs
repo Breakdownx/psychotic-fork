@@ -1,11 +1,9 @@
-//! The terminal front end: the same switches as the window, for a machine that
-//! cannot or should not open one — a server over SSH, a desktop whose graphics
-//! driver draws nothing, a user who would rather type.
+//! The terminal front end for a desktop or a server over SSH.
 //!
-//! Nothing here decides anything. The verdict on top is `gui::status` (the pure
-//! function the window's card calls), every action is an `ops` command, the
-//! report is `gui::report`. Only the drawing and the keys belong to this file,
-//! so the two front ends cannot drift into saying different things.
+//! Nothing here decides anything. The verdict on top is `status` (the pure
+//! function that builds the card), every action is an `ops` command, the
+//! report is `report`. The event loop and keys live here; drawing and formatting
+//! belong to `view`, with the operational commands kept in `ops`.
 //!
 //! Where it runs (`main`): `--tui` anywhere; on Linux also any start with no
 //! graphical session but a terminal (a server over SSH); on Windows also when no
@@ -15,49 +13,29 @@
 //! it gets a console of its own, except over SSH where there is no desktop to
 //! put one on (see `console`).
 
-use std::io::Write as _;
+mod clipboard;
+#[cfg(windows)]
+mod console;
+mod report;
+mod status;
+mod view;
+
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{
     self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
-};
-use ratatui::{DefaultTerminal, Frame};
+use ratatui::widgets::ListState;
+use ratatui::DefaultTerminal;
+
+use self::status::{Action, Facts};
+use clipboard::{copy_out, Copied};
 
 use crate::gate;
-use crate::gui::status::{self, Action, Facts, Tone};
+use crate::journal::Journal;
 use crate::ops::{self, Cap, Cmd, Event, Level, State, Status, Worker};
 use crate::update::{self, ReleaseInfo};
-
-/// How many log lines are kept, as in the window.
-const LOG_LIMIT: usize = 400;
-/// Below this the layout cannot hold the card, the list and the journal.
-const MIN_W: u16 = 50;
-const MIN_H: u16 = 18;
-
-// Paint both foreground and background so the same palette stays readable in
-// light and dark terminal profiles. Status colours retain their usual meaning.
-mod palette {
-    use ratatui::style::Color;
-
-    pub const BG: Color = Color::Rgb(24, 28, 37);
-    pub const SURFACE: Color = Color::Rgb(32, 38, 49);
-    pub const SELECTED: Color = Color::Rgb(44, 56, 72);
-    pub const TEXT: Color = Color::Rgb(230, 235, 243);
-    pub const MUTED: Color = Color::Rgb(166, 178, 197);
-    pub const BORDER: Color = Color::Rgb(111, 128, 151);
-    pub const CYAN: Color = Color::Rgb(105, 210, 225);
-    pub const VIOLET: Color = Color::Rgb(181, 161, 241);
-    pub const OK: Color = Color::Rgb(125, 211, 167);
-    pub const WARN: Color = Color::Rgb(239, 198, 120);
-    pub const ERROR: Color = Color::Rgb(245, 143, 151);
-}
 
 /// `--tui` (or `tui`, any number of dashes) anywhere on the command line.
 pub fn requested() -> bool {
@@ -162,7 +140,7 @@ struct App {
     gate: gate::View,
     gate_at: Instant,
     gate_rx: Receiver<gate::Signal>,
-    log: Vec<(Level, String)>,
+    log: Journal,
     busy: Option<String>,
 
     list: ListState,
@@ -188,9 +166,9 @@ impl App {
         let (gate_tx, gate_rx) = channel();
         gate::spawn_watch(gate_tx, Box::new(|| {}));
 
-        let mut log = Vec::new();
+        let mut log = Journal::default();
         if let Some(note) = note {
-            log.push((Level::Warn, note));
+            log.push(Level::Warn, note);
         }
         // `sudo ./ag_unlocker`: everything here is per user (the installs under
         // ~/.local/share, the systemd user unit, environment.d), and under sudo
@@ -198,13 +176,13 @@ impl App {
         #[cfg(not(windows))]
         if let Some(user) = std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty()) {
             if crate::utils::is_admin() {
-                log.push((
+                log.push(
                     Level::Warn,
                     format!(
                         "Запущено через sudo: Antigravity ищется в домашней папке root, а не {user}. \
                          Запустите без sudo — права root не нужны."
                     ),
-                ));
+                );
             }
         }
         // The UI is ready, so auto-patch may act straight away.
@@ -280,12 +258,7 @@ impl App {
         }
         while let Ok(ev) = self.events.try_recv() {
             match ev {
-                Event::Log(level, line) => {
-                    if self.log.len() >= LOG_LIMIT {
-                        self.log.remove(0);
-                    }
-                    self.log.push((level, line));
-                }
+                Event::Log(level, line) => self.log.push(level, line),
                 Event::Status(s) => self.status = Some(*s),
                 Event::Busy(what) => self.busy = what,
                 Event::ProxySaved(_, _) => {}
@@ -338,9 +311,7 @@ impl App {
     fn on_input_key(&mut self, k: KeyEvent, ctrl: bool) {
         let Some(input) = &mut self.input else { return };
         let text = match input {
-            Input::Path { text, .. }
-            | Input::OwnProxy { text }
-            | Input::CustomDns { text } => text,
+            Input::Path { text, .. } | Input::OwnProxy { text } | Input::CustomDns { text } => text,
         };
         match k.code {
             KeyCode::Esc => self.input = None,
@@ -357,7 +328,7 @@ impl App {
     fn submit_input(&mut self) {
         match self.input.take() {
             Some(Input::Path { text, .. }) => {
-                let cleaned = crate::clean_input_path(&text);
+                let cleaned = crate::installs::clean_input_path(&text);
                 if cleaned.is_empty() {
                     return;
                 }
@@ -371,12 +342,10 @@ impl App {
                     }
                 }
             }
-            Some(Input::OwnProxy { text }) => {
-                self.worker.send(Cmd::SetOwnProxy {
-                    text: text.trim().to_string(),
-                    enable: true,
-                })
-            }
+            Some(Input::OwnProxy { text }) => self.worker.send(Cmd::SetOwnProxy {
+                text: text.trim().to_string(),
+                enable: true,
+            }),
             Some(Input::CustomDns { text }) => {
                 self.worker.send(Cmd::SetCustomDns(text.trim().to_string()))
             }
@@ -446,7 +415,7 @@ impl App {
             KeyCode::Char('a') => self.act_if_offered(Action::EnableAll),
             KeyCode::Char('r') => self.act_if_offered(Action::Repair),
             KeyCode::Char('v') => self.act_if_offered(Action::Verify),
-            KeyCode::Char('o') if crate::gui::report::ENABLED => self.save_report(),
+            KeyCode::Char('o') if report::ENABLED => self.save_report(),
             KeyCode::Char('x') | KeyCode::Delete => {
                 if let Some(Row::Install(i)) = row {
                     self.forget_install(i);
@@ -634,7 +603,7 @@ impl App {
     /// Terminal, iTerm2, kitty, WezTerm, tmux pass it on to the clipboard of the
     /// machine the user sits at), which is the only clipboard an SSH session has.
     fn save_report(&mut self) {
-        let text = crate::gui::report::build(self.status.as_ref(), &self.gate);
+        let text = report::build(self.status.as_ref(), &self.gate);
         let saved = crate::utils::desktop_dir()
             .and_then(|dir| crate::utils::save_text_file(&dir, crate::utils::REPORT_FILE, &text))
             .or_else(|| {
@@ -688,675 +657,9 @@ impl App {
             rows.push(Row::Cap(Cap::OwnProxy));
             rows.push(Row::OwnProxyText);
         }
-        if crate::gui::report::ENABLED {
+        if report::ENABLED {
             rows.push(Row::Report);
         }
         rows
-    }
-
-    /// What the selected row does, for the line under the list.
-    fn row_hint(&self, row: Row) -> String {
-        match row {
-            Row::Action(a) => format!("Enter — {}.", a.label()),
-            Row::Cap(cap) => status::switch_text(cap).1.to_string(),
-            Row::Bypass => status::BYPASS_TEXT.1.to_string(),
-            Row::Install(i) => {
-                let manual = self
-                    .status
-                    .as_ref()
-                    .and_then(|s| s.installs.get(i))
-                    .is_some_and(|r| r.manual);
-                let full = self.install_path(i).unwrap_or_default();
-                let mut s = "Enter — указать путь вручную".to_string();
-                if manual {
-                    s.push_str(", x — убрать указанный путь");
-                }
-                if !full.is_empty() {
-                    s.push_str(&format!(". {full}"));
-                }
-                s
-            }
-            Row::Advanced => "Детали обхода: DNS-серверы, прокси, выходы.".into(),
-            Row::Provider(_) => "Пробел — включить или выключить сервер, +/- — выше или ниже в списке.".into(),
-            Row::CustomDnsText => "Enter — задать свой DNS: IPv4, https://… (DoH) или tls://… (DoT) через пробел.".into(),
-            Row::OwnProxyText => {
-                "Enter — изменить адрес: логин:пароль@адрес:порт (или адрес:порт без пароля).".into()
-            }
-            Row::Report => {
-                "Всё, что нужно, чтобы понять, почему Antigravity отвечает или нет — одним текстом.".into()
-            }
-        }
-    }
-
-    fn row_item(&self, row: Row, width: u16) -> ListItem<'static> {
-        let busy = self.busy.is_some();
-        match row {
-            Row::Action(a) => ListItem::new(Line::from(vec![
-                Span::styled("▶ ", Style::new().fg(palette::CYAN)),
-                Span::styled(
-                    a.label().to_string(),
-                    Style::new().add_modifier(Modifier::BOLD),
-                ),
-            ])),
-            Row::Cap(cap) => {
-                let state = self
-                    .status
-                    .as_ref()
-                    .map(|s| s.get(cap).clone())
-                    .unwrap_or(State::Off);
-                let indent = if matches!(cap, Cap::ClientPatch | Cap::Watchdog) {
-                    ""
-                } else {
-                    "  "
-                };
-                switch_line(indent, status::switch_text(cap).0, &state, busy, width)
-            }
-            Row::Bypass => {
-                let on = self.status.as_ref().is_some_and(|s| s.bypass_on());
-                let state = if on { State::On } else { State::Off };
-                switch_line("", status::BYPASS_TEXT.0, &state, busy, width)
-            }
-            Row::Install(i) => {
-                let Some(r) = self.status.as_ref().and_then(|s| s.installs.get(i)) else {
-                    return ListItem::new("");
-                };
-                let (dot, color, what) = match (&r.path, r.patched) {
-                    (None, _) => (
-                        "○",
-                        palette::MUTED,
-                        "не найдено — Enter: указать путь".to_string(),
-                    ),
-                    (Some(p), patched) => (
-                        "●",
-                        match patched {
-                            Some(true) => palette::OK,
-                            Some(false) => palette::MUTED,
-                            None => palette::MUTED,
-                        },
-                        crate::utils::mask_path(&p.display().to_string()),
-                    ),
-                };
-                let tail = match (&r.path, r.patched) {
-                    (Some(_), Some(true)) => " · пропатчен",
-                    (Some(_), Some(false)) => " · не пропатчен",
-                    (Some(_), None) => " · проверяю…",
-                    (None, _) => "",
-                };
-                ListItem::new(Line::from(vec![
-                    Span::raw("    "),
-                    Span::styled(format!("{dot} "), Style::new().fg(color)),
-                    Span::raw(format!("{}  ", r.label)),
-                    Span::styled(what, Style::new().fg(palette::MUTED)),
-                    Span::styled(tail, Style::new().fg(color)),
-                ]))
-            }
-            Row::Advanced => ListItem::new(Line::styled(
-                format!(
-                    "{} Настройки для опытных",
-                    if self.advanced { "▾" } else { "▸" }
-                ),
-                Style::new().fg(palette::VIOLET),
-            )),
-            Row::Provider(i) => {
-                let Some(p) = self.status.as_ref().and_then(|s| s.providers.get(i)) else {
-                    return ListItem::new("");
-                };
-                let state = if p.enabled { State::On } else { State::Off };
-                let name = format!("{}. {}", i + 1, status::provider_name(&p.name));
-                switch_line("      ", &name, &state, busy, width)
-            }
-            Row::CustomDnsText => {
-                let text = self.custom_dns_text();
-                let shown = if text.is_empty() {
-                    "не задан".to_string()
-                } else {
-                    text
-                };
-                ListItem::new(Line::from(vec![
-                    Span::raw("      Свой DNS: "),
-                    Span::styled(shown, Style::new().fg(palette::MUTED)),
-                ]))
-            }
-            Row::OwnProxyText => {
-                let text = self.own_proxy_text();
-                let shown = if text.is_empty() {
-                    "не задан".to_string()
-                } else {
-                    text
-                };
-                ListItem::new(Line::from(vec![
-                    Span::raw("      Адрес прокси: "),
-                    Span::styled(shown, Style::new().fg(palette::MUTED)),
-                ]))
-            }
-            Row::Report => ListItem::new(Line::from(vec![
-                Span::styled("⎘ ", Style::new().fg(palette::CYAN)),
-                Span::raw("Сохранить отчёт"),
-            ])),
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Drawing
-    // -----------------------------------------------------------------------
-
-    fn draw(&mut self, f: &mut Frame) {
-        let area = f.area();
-        f.render_widget(
-            Block::new().style(Style::new().fg(palette::TEXT).bg(palette::BG)),
-            area,
-        );
-        if area.width < MIN_W || area.height < MIN_H {
-            f.render_widget(
-                Paragraph::new(format!(
-                    "Окно терминала слишком маленькое: нужно хотя бы {MIN_W}×{MIN_H} (сейчас {}×{}).",
-                    area.width, area.height
-                ))
-                .wrap(Wrap { trim: true }),
-                area,
-            );
-            return;
-        }
-        self.draw_main(f, area);
-    }
-
-    fn title_line(&self) -> Line<'static> {
-        let mut spans = vec![Span::styled(
-            format!(" Antigravity Unlocker 2 v{} ", update::current_version()),
-            Style::new().fg(palette::CYAN).add_modifier(Modifier::BOLD),
-        )];
-        if let Some(rel) = &self.update {
-            spans.push(Span::styled(
-                format!(
-                    " ⬆ новая версия {}: {} ",
-                    rel.display_version(),
-                    update::RELEASES_LATEST_URL
-                ),
-                Style::new()
-                    .fg(palette::BG)
-                    .bg(palette::VIOLET)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        Line::from(spans)
-    }
-
-    fn draw_main(&mut self, f: &mut Frame, area: Rect) {
-        let facts = self.facts();
-        let headline = facts.as_ref().map(status::headline);
-
-        // The card's height follows its text, so a long detail is never cut.
-        let inner_w = area.width.saturating_sub(4);
-        let card_h = match &headline {
-            Some(h) => 2 + 1 + wrapped_height(&h.detail, inner_w) + u16::from(self.busy.is_some()),
-            None => 3,
-        }
-        .min(area.height / 3);
-        let vpn_h = if facts.as_ref().is_some_and(|f| f.relay_uses_vpn) {
-            wrapped_height(status::VPN_TRAFFIC_NOTICE, area.width)
-        } else {
-            0
-        };
-        let log_h = if area.height >= 32 { 9 } else { 6 };
-        let log_h = log_h.min(area.height.saturating_sub(8 + card_h + vpn_h));
-        let [top, card, vpn, list, hint, journal, keys] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(card_h),
-            Constraint::Length(vpn_h),
-            Constraint::Min(4),
-            Constraint::Length(2),
-            Constraint::Length(log_h),
-            Constraint::Length(1),
-        ])
-        .areas(area);
-
-        f.render_widget(
-            Paragraph::new(self.title_line()).style(Style::new().bg(palette::SURFACE)),
-            top,
-        );
-        self.draw_card(f, card, headline.as_ref());
-        if vpn_h != 0 {
-            f.render_widget(
-                Paragraph::new(status::VPN_TRAFFIC_NOTICE)
-                    .style(Style::new().fg(palette::WARN))
-                    .wrap(Wrap { trim: true }),
-                vpn,
-            );
-        }
-
-        let rows = self.rows();
-        let (at, _) = self.cursor(&rows);
-        self.list.select(Some(at));
-        let items: Vec<ListItem> = rows.iter().map(|r| self.row_item(*r, list.width)).collect();
-        let list_widget = List::new(items)
-            .style(Style::new().fg(palette::TEXT).bg(palette::BG))
-            .highlight_style(
-                Style::new()
-                    .bg(palette::SELECTED)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("› ");
-        f.render_stateful_widget(list_widget, list, &mut self.list);
-
-        let selected = self.list.selected().and_then(|i| rows.get(i).copied());
-        let hint_text = selected.map(|r| self.row_hint(r)).unwrap_or_default();
-        f.render_widget(
-            Paragraph::new(hint_text)
-                .style(Style::new().fg(palette::MUTED))
-                .wrap(Wrap { trim: true }),
-            hint,
-        );
-
-        self.draw_journal(f, journal);
-        self.draw_keys(f, keys);
-
-        if self.input.is_some() {
-            self.draw_input(f, area);
-        }
-    }
-
-    fn draw_card(&self, f: &mut Frame, area: Rect, headline: Option<&status::Headline>) {
-        let Some(h) = headline else {
-            f.render_widget(
-                Paragraph::new("Проверяю систему…")
-                    .style(Style::new().fg(palette::MUTED).bg(palette::SURFACE))
-                    .block(
-                        Block::new()
-                            .borders(Borders::ALL)
-                            .border_type(BorderType::Rounded)
-                            .border_style(Style::new().fg(palette::CYAN)),
-                    ),
-                area,
-            );
-            return;
-        };
-        let color = match h.tone {
-            Tone::Ok => palette::OK,
-            Tone::Wait => palette::CYAN,
-            Tone::Fixing => palette::WARN,
-            Tone::Action => palette::ERROR,
-            Tone::Off => palette::MUTED,
-        };
-        let mut lines = vec![Line::from(vec![
-            Span::styled("● ", Style::new().fg(color)),
-            Span::styled(h.title.clone(), Style::new().add_modifier(Modifier::BOLD)),
-        ])];
-        lines.push(Line::raw(h.detail.clone()));
-        if let Some(what) = &self.busy {
-            lines.push(Line::styled(
-                format!("⏳ {what}"),
-                Style::new().fg(palette::WARN),
-            ));
-        }
-        f.render_widget(
-            Paragraph::new(lines)
-                .style(Style::new().fg(palette::TEXT).bg(palette::SURFACE))
-                .wrap(Wrap { trim: true })
-                .block(
-                    Block::new()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::new().fg(color)),
-                ),
-            area,
-        );
-    }
-
-    fn draw_journal(&self, f: &mut Frame, area: Rect) {
-        let block = Block::new()
-            .borders(Borders::TOP)
-            .title(Span::styled(" Журнал ", Style::new().fg(palette::VIOLET)))
-            .border_style(Style::new().fg(palette::BORDER));
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-        // Newest at the bottom; only as many as fit once wrapped.
-        let mut lines: Vec<Line> = Vec::new();
-        let mut used = 0u16;
-        for (level, text) in self.log.iter().rev() {
-            let shown = if *level == Level::Step {
-                format!("— {text}")
-            } else {
-                text.clone()
-            };
-            let h = wrapped_height(&shown, inner.width);
-            if used + h > inner.height {
-                break;
-            }
-            used += h;
-            let color = match level {
-                Level::Ok => palette::OK,
-                Level::Warn => palette::WARN,
-                Level::Err => palette::ERROR,
-                Level::Step => palette::CYAN,
-                Level::Info => palette::TEXT,
-            };
-            lines.push(Line::styled(shown, Style::new().fg(color)));
-        }
-        lines.reverse();
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-    }
-
-    fn draw_keys(&mut self, f: &mut Frame, area: Rect) {
-        if let Some((text, at)) = &self.toast {
-            if at.elapsed() < Duration::from_secs(6) {
-                f.render_widget(
-                    Paragraph::new(text.clone()).style(Style::new().fg(palette::CYAN)),
-                    area,
-                );
-                return;
-            }
-            self.toast = None;
-        }
-        let offered = match self.facts().and_then(|f| status::headline(&f).action) {
-            Some(Action::EnableAll) => " · a — включить всё",
-            Some(Action::Repair) => " · r — починить",
-            Some(Action::Verify) => " · v — пройти верификацию",
-            _ => "",
-        };
-        let report = if crate::gui::report::ENABLED {
-            " · o — отчёт"
-        } else {
-            ""
-        };
-        let keys = format!("↑↓ выбор · Пробел/Enter — вкл/выкл{offered}{report} · q — выход");
-        f.render_widget(
-            Paragraph::new(keys).style(Style::new().fg(palette::MUTED)),
-            area,
-        );
-    }
-
-    fn draw_input(&self, f: &mut Frame, area: Rect) {
-        let (title, hint, text, error) = match &self.input {
-            Some(Input::Path { text, error }) => (
-                " Путь к Antigravity ",
-                "Папка установки Antigravity, IDE или CLI. Можно указать вложенную — корень будет найден сам.",
-                text,
-                error.as_deref(),
-            ),
-            Some(Input::CustomDns { text }) => (
-                " Свой DNS ",
-                "IPv4-адреса DNS-серверов через пробел. Сервер участвует в пуле наравне с остальными, ответ сверяется с эталонным. Пустая строка — убрать.",
-                text,
-                None,
-            ),
-            Some(Input::OwnProxy { text }) => (
-                " Свой HTTP-прокси ",
-                "Формат: логин:пароль@адрес:порт — или просто адрес:порт, если пароля нет. \
-                 Например ivan:secret@203.0.113.9:3128. Только HTTP-прокси. \
-                 Пустая строка — убрать прокси.",
-                text,
-                None,
-            ),
-            None => return,
-        };
-        let w = area.width.saturating_sub(8).min(90);
-        // Borders, the wrapped hint, a blank line, the field, the error, the keys.
-        let h = 2 + wrapped_height(hint, w.saturating_sub(2)) + 3 + u16::from(error.is_some());
-        let popup = Rect {
-            x: area.x + (area.width - w) / 2,
-            y: area.y + area.height.saturating_sub(h) / 2,
-            width: w,
-            height: h,
-        };
-        let shown = match &self.input {
-            Some(Input::OwnProxy { .. }) => match text.rsplit_once('@') {
-                Some((_, address)) => format!("••••@{address}"),
-                None => text.clone(),
-            },
-            _ => text.clone(),
-        };
-        let mut lines = vec![
-            Line::styled(hint, Style::new().fg(palette::MUTED)),
-            Line::raw(""),
-            Line::from(vec![
-                Span::raw("› "),
-                Span::raw(shown),
-                Span::styled("▏", Style::new().fg(palette::CYAN)),
-            ]),
-        ];
-        if let Some(e) = error {
-            lines.push(Line::styled(e.to_string(), Style::new().fg(palette::ERROR)));
-        }
-        lines.push(Line::styled(
-            "Enter — применить · Esc — отмена",
-            Style::new().fg(palette::MUTED),
-        ));
-        f.render_widget(Clear, popup);
-        f.render_widget(
-            Paragraph::new(lines)
-                .style(Style::new().fg(palette::TEXT).bg(palette::SURFACE))
-                .wrap(Wrap { trim: false })
-                .block(
-                    Block::new()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::new().fg(palette::VIOLET))
-                        .title(Span::styled(title, Style::new().fg(palette::CYAN))),
-                ),
-            popup,
-        );
-    }
-}
-
-/// One switch as a line: `[вкл ] Title — note`.
-fn switch_line(
-    indent: &str,
-    title: &str,
-    state: &State,
-    busy: bool,
-    width: u16,
-) -> ListItem<'static> {
-    let (badge, color) = match state {
-        State::On => ("[вкл ]", palette::OK),
-        State::Partial(_) => ("[вкл~]", palette::WARN),
-        State::Off | State::OffNote(_) => ("[выкл]", palette::MUTED),
-        State::Blocked(_) => ("[ -- ]", palette::WARN),
-    };
-    let color = if busy { palette::MUTED } else { color };
-    let mut spans = vec![
-        Span::raw(indent.to_string()),
-        Span::styled(badge, Style::new().fg(color)),
-        Span::raw(format!(" {title}")),
-    ];
-    if let Some(note) = state.note() {
-        let used = (indent.chars().count() + 7 + title.chars().count() + 3) as u16;
-        let room = width.saturating_sub(used + 2) as usize;
-        if room > 8 {
-            let note: String = if note.chars().count() > room {
-                note.chars()
-                    .take(room - 1)
-                    .chain(std::iter::once('…'))
-                    .collect()
-            } else {
-                note.to_string()
-            };
-            let note_color = if matches!(state, State::Blocked(_)) {
-                palette::WARN
-            } else {
-                palette::MUTED
-            };
-            spans.push(Span::styled(
-                format!(" — {note}"),
-                Style::new().fg(note_color),
-            ));
-        }
-    }
-    ListItem::new(Line::from(spans))
-}
-
-/// Lines `text` takes when wrapped to `width` columns — close enough to what
-/// `Paragraph` does to size a box around it.
-fn wrapped_height(text: &str, width: u16) -> u16 {
-    let width = usize::from(width.max(1));
-    text.split('\n')
-        .map(|line| {
-            let n = line.chars().count();
-            (n.max(1) + width - 1) / width
-        })
-        .sum::<usize>()
-        .min(usize::from(u16::MAX)) as u16
-}
-
-enum Copied {
-    Clipboard,
-    Terminal,
-}
-
-/// Windows has a clipboard of its own to put the text on. Anywhere else this
-/// may be a server with none, so the text goes to the terminal as OSC 52, which
-/// a terminal that supports it copies on the machine the user sits at.
-fn copy_out(text: &str) -> Copied {
-    #[cfg(windows)]
-    if crate::utils::set_clipboard_text(text) {
-        return Copied::Clipboard;
-    }
-    let _ = copy_to_terminal(text);
-    Copied::Terminal
-}
-
-fn copy_to_terminal(text: &str) -> std::io::Result<()> {
-    let mut out = std::io::stdout().lock();
-    write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()))?;
-    out.flush()
-}
-
-fn base64(data: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
-// Windows: a console to draw in
-// ---------------------------------------------------------------------------
-
-#[cfg(windows)]
-mod console {
-    use std::ffi::c_void;
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn AllocConsole() -> i32;
-        fn AttachConsole(pid: u32) -> i32;
-        fn FreeConsole() -> i32;
-        fn SetStdHandle(which: u32, handle: *mut c_void) -> i32;
-        fn SetConsoleTitleW(title: *const u16) -> i32;
-        fn CreateFileW(
-            name: *const u16,
-            access: u32,
-            share: u32,
-            security: *mut c_void,
-            disposition: u32,
-            flags: u32,
-            template: *mut c_void,
-        ) -> *mut c_void;
-    }
-
-    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
-    const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
-    const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
-    const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
-    const GENERIC_READ: u32 = 0x8000_0000;
-    const GENERIC_WRITE: u32 = 0x4000_0000;
-    const FILE_SHARE_READ: u32 = 1;
-    const FILE_SHARE_WRITE: u32 = 2;
-    const OPEN_EXISTING: u32 = 3;
-
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
-    /// A console for the terminal UI.
-    ///
-    /// Its own window, normally: this is a GUI-subsystem exe, so the shell that
-    /// started it has already gone back to its prompt, and sharing that console
-    /// would hand every other keystroke to the shell.
-    ///
-    /// The console it was started from, when the caller says it waits
-    /// (`--inline`: `tui.ps1` runs `Start-Process -Wait -NoNewWindow`, cmd
-    /// `start /b /wait`), and over SSH, where there is no desktop for a window
-    /// to appear on at all — there, too, the shell has to be told to wait.
-    pub fn open() -> Result<(), String> {
-        let over_ssh = std::env::var_os("SSH_CONNECTION").is_some()
-            || std::env::var_os("SSH_CLIENT").is_some();
-        let inline = over_ssh
-            || std::env::args()
-                .skip(1)
-                .any(|a| a.trim_start_matches('-').eq_ignore_ascii_case("inline"));
-        unsafe {
-            let attached = inline && AttachConsole(ATTACH_PARENT_PROCESS) != 0;
-            if !attached {
-                FreeConsole();
-                if AllocConsole() == 0 {
-                    return Err("не удалось открыть консоль для терминального режима".into());
-                }
-            }
-            // Whatever handles we inherited (none, for a GUI process, or a pipe
-            // someone redirected) are pointed at this console: Rust's stdout
-            // writes through WriteConsoleW when its handle is a console, which is
-            // what keeps Cyrillic intact whatever the code page.
-            for (which, name) in [
-                (STD_INPUT_HANDLE, "CONIN$"),
-                (STD_OUTPUT_HANDLE, "CONOUT$"),
-                (STD_ERROR_HANDLE, "CONOUT$"),
-            ] {
-                let name = wide(name);
-                let h = CreateFileW(
-                    name.as_ptr(),
-                    GENERIC_READ | GENERIC_WRITE,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    std::ptr::null_mut(),
-                    OPEN_EXISTING,
-                    0,
-                    std::ptr::null_mut(),
-                );
-                if !h.is_null() && h != (-1isize) as *mut c_void {
-                    SetStdHandle(which, h);
-                }
-            }
-            let title = wide("Antigravity Unlocker");
-            SetConsoleTitleW(title.as_ptr());
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn base64_matches_the_standard_alphabet_and_padding() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
-        assert_eq!(base64("ключ".as_bytes()), "0LrQu9GO0Yc=");
-    }
-
-    #[test]
-    fn a_wrapped_line_counts_every_row_it_takes() {
-        assert_eq!(wrapped_height("", 10), 1);
-        assert_eq!(wrapped_height("abcdefghij", 10), 1);
-        assert_eq!(wrapped_height("abcdefghijk", 10), 2);
-        assert_eq!(wrapped_height("ab\ncd", 10), 2);
-        // Cyrillic is one column per letter, not one per byte.
-        assert_eq!(wrapped_height("ключключкл", 10), 1);
     }
 }

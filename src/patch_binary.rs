@@ -1077,12 +1077,12 @@ mod tests {
     #[test]
     #[ignore = "reads the real installs on this machine; run with --ignored"]
     fn inspects_the_installs_on_this_machine() {
-        let installs = crate::discover_installs_fast();
+        let installs = crate::installs::discover_installs_fast();
         println!("установок найдено: {}", installs.len());
         for install in &installs {
             println!(
                 "\n{} — {}",
-                crate::install_label(install),
+                crate::installs::install_label(install),
                 install.display()
             );
             for (path, state) in inspect_install(install).files {

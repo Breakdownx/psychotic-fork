@@ -483,9 +483,9 @@ pub fn patch_now(inst: &Path) -> Vec<(PathBuf, RepatchOutcome)> {
 /// The standard locations plus every path the user pointed the window at: an
 /// install they had to find by hand is exactly the one no scan knows about.
 fn discover() -> Vec<PathBuf> {
-    let mut installs = crate::discover_installs_fast();
+    let mut installs = crate::installs::discover_installs_fast();
     for manual in crate::settings::manual_paths() {
-        if let Some(root) = crate::resolve_install_root(&manual) {
+        if let Some(root) = crate::installs::resolve_install_root(&manual) {
             if !installs.contains(&root) {
                 installs.push(root);
             }
