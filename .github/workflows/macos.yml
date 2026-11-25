@@ -65,14 +65,15 @@ jobs:
         run: |
           mkdir -p dist
           macos/build.sh --out dist | tee build.out
-          grep -E '^(version|name|tgz|app_zip)=' build.out >> "$GITHUB_OUTPUT"
+          grep -E '^(version|name|tgz|app_zip|dmg)=' build.out >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.pack.outputs.name }}
           path: |
-            ${{ steps.pack.outputs.tgz }}
+            ${{ steps.pack.outputs.dmg }}
             ${{ steps.pack.outputs.app_zip }}
+            ${{ steps.pack.outputs.tgz }}
           if-no-files-found: error
 
       - name: Attach to release
@@ -82,5 +83,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release != '' && inputs.release || github.ref_name }}
         run: |
-          gh release upload "$TAG" "${{ steps.pack.outputs.tgz }}" "${{ steps.pack.outputs.app_zip }}" \
+          gh release upload "$TAG" "${{ steps.pack.outputs.dmg }}" "${{ steps.pack.outputs.app_zip }}" \
+            "${{ steps.pack.outputs.tgz }}" \
             --clobber --repo "$GITHUB_REPOSITORY"

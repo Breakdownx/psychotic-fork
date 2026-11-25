@@ -432,14 +432,18 @@ pub fn headline(f: &Facts) -> Headline {
     // button is not a loop. The button stays so a retry after granting is one
     // click away.
     if f.patch_blocked {
+        #[cfg(target_os = "macos")]
+        let who = crate::macos::app_management_grantee();
+        #[cfg(not(target_os = "macos"))]
+        let who = "программу, из которой запущен анлокер";
         return Headline {
             tone: Tone::Action,
             title: "macOS не даёт пропатчить Antigravity".into(),
-            detail: "Antigravity стоит в защищённой папке, и macOS не даёт анлокеру изменить его \
-                     файлы. Откройте «Системные настройки» → «Конфиденциальность и безопасность» → \
-                     «Управление приложениями» и включите там программу, из которой запущен анлокер \
-                     (обычно Терминал), затем нажмите «Включить всё»."
-                .into(),
+            detail: format!(
+                "Antigravity стоит в защищённой папке, и macOS не даёт анлокеру изменить его \
+                 файлы. Откройте «Системные настройки» → «Конфиденциальность и безопасность» → \
+                 «Управление приложениями» и включите там {who}, затем нажмите «Включить всё»."
+            ),
             action: Some(Action::EnableAll),
         };
     }

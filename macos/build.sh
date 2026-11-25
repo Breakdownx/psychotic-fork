@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Builds the macOS (Apple Silicon) distribution: the folder bundle with its
-# double-click launcher, its .tar.gz, and the .app with its .zip.
+# Builds the macOS (Apple Silicon) distribution: the .app, as a drag-to-install
+# .dmg and as a .zip, and the fallback folder bundle (bare binary + double-click
+# launcher) as a .tar.gz.
+#
+# Signed ad hoc, so the app and image names carry `-local`, the convention the
+# release guide uses for builds Gatekeeper has not been shown by Apple
+# (docs/обновление-antigravity.md, «Выпуск для Mac»).
 #
 #   macos/build.sh                 build, then assemble into release/
 #   macos/build.sh --out DIR       assemble into DIR instead
@@ -30,6 +35,9 @@ VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 ASSET_VER=$(printf '%s' "$VER" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)$/\1_\2/')
 NAME="AG_${ASSET_VER}_macos"
 APP_NAME="Antigravity Unlocker.app"
+VOLUME="Antigravity Unlocker"
+APP_ZIP="AG_${ASSET_VER}_macOS_arm64_app-local.zip"
+DMG="AG_${ASSET_VER}_macOS_arm64-local.dmg"
 BIN_ID="local.antigravity.unlocker"
 TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT/target}
 BIN="$TARGET_DIR/$TARGET/release/ag_unlocker"
@@ -74,11 +82,24 @@ codesign --verify --strict --verbose=1 "$APP"
 mkdir -p "$OUT"
 rm -rf "$OUT/$NAME" "$OUT/$APP_NAME"
 cp -R "$STAGE/$NAME" "$OUT/$NAME"
-cp -R "$APP" "$OUT/$APP_NAME"
+ditto "$APP" "$OUT/$APP_NAME"
 tar --no-mac-metadata -C "$STAGE" -czf "$OUT/$NAME.tar.gz" "$NAME"
-ditto -c -k --norsrc --noextattr --keepParent "$APP" "$OUT/AG_${ASSET_VER}_macOS_arm64_app.zip"
+ditto -c -k --norsrc --noextattr --keepParent "$APP" "$OUT/$APP_ZIP"
+
+# ---- The disk image: the app beside a link to /Applications, so installing is
+# one drag, plus the README. Compressed (UDZO), read-only.
+DMG_ROOT="$STAGE/dmg"
+mkdir -p "$DMG_ROOT"
+ditto --norsrc --noextattr "$APP" "$DMG_ROOT/$APP_NAME"
+ln -s /Applications "$DMG_ROOT/Applications"
+cp macos/README.md "$DMG_ROOT/README.md"
+rm -f "$OUT/$DMG"
+hdiutil create -quiet -volname "$VOLUME" -srcfolder "$DMG_ROOT" -fs HFS+ \
+  -format UDZO -ov "$OUT/$DMG"
+hdiutil verify -quiet "$OUT/$DMG"
 
 echo "version=$VER"
 echo "name=$NAME"
 echo "tgz=$OUT/$NAME.tar.gz"
-echo "app_zip=$OUT/AG_${ASSET_VER}_macOS_arm64_app.zip"
+echo "app_zip=$OUT/$APP_ZIP"
+echo "dmg=$OUT/$DMG"

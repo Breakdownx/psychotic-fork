@@ -133,13 +133,38 @@ pub fn app_management_hint(path: &Path, err: &str) -> String {
         format!(
             "{err}. macOS не дал изменить приложение: Системные настройки → \
              Конфиденциальность и безопасность → Управление приложениями → \
-             включите Терминал (или программу, из которой запущен разблокировщик), \
-             затем повторите"
+             включите {}, затем повторите",
+            app_management_grantee()
         )
     } else {
         err.to_string()
     }
 }
+
+/// What the user switches on in App Management for *this* process to be let
+/// in: the app it runs inside, the background service's own copy, or - for the
+/// bare binary - the terminal it was started from.
+pub fn app_management_grantee() -> String {
+    let exe = std::env::current_exe().ok();
+    grantee_for(exe.as_deref(), &crate::background::installed_exe())
+}
+
+fn grantee_for(exe: Option<&Path>, service_exe: &Path) -> String {
+    let Some(exe) = exe else {
+        return TERMINAL_GRANTEE.to_string();
+    };
+    if let Some(name) = bundle_of(exe).as_deref().and_then(Path::file_stem) {
+        return format!("«{}»", name.to_string_lossy());
+    }
+    if exe == service_exe {
+        if let Some(name) = exe.file_name() {
+            return format!("«{}» (фоновую службу анлокера)", name.to_string_lossy());
+        }
+    }
+    TERMINAL_GRANTEE.to_string()
+}
+
+const TERMINAL_GRANTEE: &str = "Терминал (или программу, из которой запущен анлокер)";
 
 /// Whether an error's text is EPERM - how macOS words a TCC refusal, as opposed
 /// to EACCES for the permission bits.
@@ -400,6 +425,17 @@ mod tests {
         let bin = Path::new("/Applications/Antigravity.app/Contents/Resources/bin/language_server");
         assert!(is_app_management_refusal(&app_management_hint(bin, &eperm)));
         assert_eq!(app_management_hint(bin, &eacces), eacces);
+    }
+
+    #[test]
+    fn the_grant_names_the_app_the_service_or_the_terminal() {
+        let service = Path::new("/Users/x/.local/share/agunlocker/ag_proxy");
+        let app = Path::new("/Applications/Antigravity Unlocker.app/Contents/MacOS/ag_unlocker");
+        assert_eq!(grantee_for(Some(app), service), "«Antigravity Unlocker»");
+        assert!(grantee_for(Some(service), service).starts_with("«ag_proxy»"));
+        let bare = Path::new("/Users/x/Downloads/AG_2.35.1_macos/ag_unlocker");
+        assert_eq!(grantee_for(Some(bare), service), TERMINAL_GRANTEE);
+        assert_eq!(grantee_for(None, service), TERMINAL_GRANTEE);
     }
 
     #[test]
