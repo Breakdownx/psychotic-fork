@@ -1,0 +1,8 @@
+# Cargo build output
+/target/
+
+# macOS Finder metadata
+.DS_Store
+
+# Python bytecode from build_rust.py
+__pycache__/

@@ -30,6 +30,9 @@ jobs:
         with:
           key: macos-arm64
 
+      - name: Test
+        run: cargo test --bin ag_unlocker --target aarch64-apple-darwin
+
       - name: Build
         run: cargo build --release --bin ag_unlocker --target aarch64-apple-darwin
 
