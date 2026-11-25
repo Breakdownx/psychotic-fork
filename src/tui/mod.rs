@@ -133,8 +133,6 @@ enum Row {
     OwnProxyText,
     CustomDnsText,
     GroupProxyText,
-    GroupProxyOpenRoom,
-    GroupProxyCopy,
     GroupProxyPaste,
     Report,
 }
@@ -527,21 +525,6 @@ impl App {
                         .send(Cmd::SetProvider(p.name.clone(), !p.enabled));
                 }
             }
-            Row::GroupProxyOpenRoom => {
-                crate::utils::open_url("https://t.me/nova_txt/69864");
-                self.toast("Открыто в браузере: https://t.me/nova_txt/69864");
-            }
-            Row::GroupProxyCopy => {
-                let cmd = format!("/ag+{}", crate::hwid::pc_code());
-                let message = if crate::utils::set_clipboard_text(&cmd) {
-                    "Команда скопирована — вставьте её в Telegram."
-                } else if copy_to_terminal(&cmd).is_ok() {
-                    "Если вставка не сработает, выделите команду в списке."
-                } else {
-                    "Не удалось скопировать — выделите команду в списке."
-                };
-                self.toast(message);
-            }
             Row::GroupProxyPaste => {
                 // Over SSH (or with no display) there is no clipboard to read:
                 // the key is then typed or pasted into a field, which the
@@ -720,8 +703,6 @@ impl App {
             rows.push(Row::Cap(Cap::LocalProxy));
             rows.push(Row::Cap(Cap::GroupProxy));
             rows.push(Row::GroupProxyText);
-            rows.push(Row::GroupProxyOpenRoom);
-            rows.push(Row::GroupProxyCopy);
             rows.push(Row::GroupProxyPaste);
             rows.push(Row::Cap(Cap::OwnProxy));
             rows.push(Row::OwnProxyText);
@@ -756,16 +737,14 @@ impl App {
             }
             Row::Advanced => "Детали обхода: DNS-серверы, прокси, выходы.".into(),
             Row::Provider(_) => "Пробел — включить или выключить сервер, +/- — выше или ниже в списке.".into(),
-            Row::GroupProxyText => "Команда для Telegram и состояние ключа.".into(),
-            Row::GroupProxyOpenRoom => "Открыть Telegram-комнату для получения ключа.".into(),
-            Row::GroupProxyCopy => "Скопировать команду для получения ключа.".into(),
+            Row::GroupProxyText => "Состояние ключа.".into(),
             Row::GroupProxyPaste => "Вставить полученный ключ (из буфера обмена или в поле ввода).".into(),
             Row::CustomDnsText => "Enter — задать свой DNS: IPv4, https://… (DoH) или tls://… (DoT) через пробел.".into(),
             Row::OwnProxyText => {
                 "Enter — изменить адрес: логин:пароль@адрес:порт (или адрес:порт без пароля).".into()
             }
             Row::Report => {
-                "Всё, что нужно, чтобы понять, почему Antigravity отвечает или нет — одним текстом для группы.".into()
+                "Всё, что нужно, чтобы понять, почему Antigravity отвечает или нет — одним текстом.".into()
             }
         }
     }
@@ -848,30 +827,18 @@ impl App {
                 switch_line("      ", &name, &state, busy, width)
             }
             Row::GroupProxyText => {
-                let pc = crate::hwid::pc_code();
                 let key_text = if crate::settings::group_key().is_empty() {
                     "ключа нет"
                 } else if crate::group::key_rejected() {
-                    "код перестал работать - получите новый в группе"
+                    "ключ перестал работать"
                 } else {
                     "ключ есть"
                 };
                 ListItem::new(Line::from(vec![
-                    Span::raw("      Команда: "),
-                    Span::styled(
-                        format!("/ag+{pc} - {key_text}"),
-                        Style::new().fg(Color::Gray),
-                    ),
+                    Span::raw("      Состояние: "),
+                    Span::styled(key_text, Style::new().fg(Color::Gray)),
                 ]))
             }
-            Row::GroupProxyOpenRoom => ListItem::new(Line::from(vec![Span::styled(
-                "      > Открыть комнату группы",
-                Style::new().fg(Color::Cyan),
-            )])),
-            Row::GroupProxyCopy => ListItem::new(Line::from(vec![Span::styled(
-                "      > Скопировать команду",
-                Style::new().fg(Color::Cyan),
-            )])),
             Row::GroupProxyPaste => ListItem::new(Line::from(vec![Span::styled(
                 "      > Вставить ключ из буфера",
                 Style::new().fg(Color::Cyan),

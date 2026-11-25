@@ -4,7 +4,7 @@
 //! «Поставил анлокер, но не помогает что-то» plus a screenshot of a green card
 //! was undiagnosable (G50): the one fact that mattered - the client was not
 //! going through us at all - was nowhere on screen. This puts every fact the
-//! window and the relay have into plain text a user can send to the group.
+//! window and the relay have into plain text.
 //!
 //! Nothing secret goes in: paths are masked the way the window shows them, the
 //! built-in exits are named only as «встроенный выход» (I46), and the relay's
@@ -22,13 +22,12 @@ use crate::utils::mask_path;
 /// are untouched.
 pub const ENABLED: bool = cfg!(debug_assertions);
 
-/// The tail of a «what to try» message: the report when it can be made, the
-/// group otherwise.
+/// The tail of a «what to try» message: the report when it can be made.
 pub fn when_stuck() -> &'static str {
     if ENABLED {
-        "нажмите «Сохранить отчёт» и пришлите файл с рабочего стола в группу."
+        " Не помогло — нажмите «Сохранить отчёт»."
     } else {
-        "напишите об этом в группу."
+        ""
     }
 }
 

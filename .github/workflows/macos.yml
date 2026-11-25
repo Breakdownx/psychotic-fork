@@ -95,7 +95,7 @@ jobs:
           mkdir -p "release/$NAME"
           cp "$BIN" "release/$NAME/ag_unlocker"
           chmod +x "release/$NAME/ag_unlocker"
-          cp linux/README.md "release/$NAME/README.md" 2>/dev/null || true
+          cp README.md "release/$NAME/README.md"
           cat > "release/$NAME/Запустить.command" <<'SH'
           #!/bin/sh
           # Double-click launcher. Strips our own quarantine flag (a downloaded

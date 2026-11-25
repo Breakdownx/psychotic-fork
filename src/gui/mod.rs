@@ -1,7 +1,7 @@
 //! The desktop GUI.
 //!
-//! Replaces the numbered console menu with an Overview and navigable pages.
-//! License entry lives in Settings. Nothing here blocks — system work
+//! A compact native window for patch controls and the journal.
+//! Nothing here blocks — system work
 //! goes to the `ops` worker and comes back as status snapshots and log lines.
 
 mod icon;
@@ -15,18 +15,12 @@ mod widgets;
 use eframe::egui;
 use std::sync::mpsc::{channel, Receiver};
 
-use crate::gate;
 use crate::ops::{self, Cmd, Event, Level, Status, Worker};
 use crate::settings::Settings;
 use crate::update::{self, ReleaseInfo};
 
-pub const TELEGRAM_GROUP_URL: &str = "https://t.me/nova_txt";
-/// The room the free keys are pinned in (spec item 9), not the group root.
-pub const TELEGRAM_KEYS_URL: &str = "https://t.me/nova_txt/69864";
-pub const DONATE_URL: &str = "https://nova.gratis/donate/";
-
-const WIN_W: f32 = 940.0;
-const WIN_H: f32 = 650.0;
+const WIN_W: f32 = 680.0;
+const WIN_H: f32 = 435.0;
 
 /// How many log lines are kept. The window can stay open for days; an unbounded
 /// Vec of every line a re-patch loop produced is a slow leak.
@@ -49,46 +43,14 @@ pub struct App {
     events: Receiver<Event>,
     status: Option<Status>,
 
-    /// What the gate watcher last found: the client's own region-400s, and the
-    /// relay's record of what it did about them.
-    gate: gate::View,
-    /// When that arrived. The watcher sends an age measured at its own tick and
-    /// then stays quiet while nothing changes (waking the UI three times a
-    /// minute to redraw the same line is not worth it), so the window ages its
-    /// copy itself from here.
-    gate_at: std::time::Instant,
-    gate_rx: Receiver<gate::Signal>,
     log: Vec<(Level, String)>,
     /// Ctrl+A over the journal. Our own, because egui's label selection is per
     /// galley and the journal is one label per line.
     log_all_selected: bool,
     busy: Option<String>,
     main_view: main_view::ViewState,
-
-    own_proxy_input: String,
-    custom_dns_input: String,
-    group_key_input: String,
-    /// The provider list as the window is drawing it right now.
-    ///
-    /// Kept beside the worker's snapshot so a drag can reorder it on the spot.
-    /// Waiting for the round trip — save, re-read, push a new status — makes the
-    /// row snap back under the pointer and the drag feel broken, which is
-    /// exactly what it looked like.
-    providers_local: Vec<crate::ops::ProviderRow>,
-    /// True between picking a row up and the worker acknowledging the new order.
-    providers_reordering: bool,
-    /// When «Добавить анлокер в исключения VPN» last copied the path: the
-    /// button says so for a few seconds.
-    vpn_path_copied: Option<std::time::Instant>,
     path_dialog: Option<String>,
     path_dialog_error: Option<String>,
-    /// The report file the button last wrote, and when — for as long as the
-    /// card keeps telling the user where it is. Longer than a toast on purpose:
-    /// this is an instruction to go and attach a file, not an acknowledgement.
-    report_saved: Option<(std::time::Instant, std::path::PathBuf)>,
-    /// Set instead when there was nowhere to write it and the text went to the
-    /// clipboard alone.
-    report_clipboard_at: Option<std::time::Instant>,
     /// Frames drawn so far, up to the few it takes to call the renderer proven
     /// (`renderer::confirm`).
     frames: u8,
@@ -113,17 +75,7 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         let worker = ops::spawn(ev_tx, Box::new(move || ctx.request_repaint()));
 
-        // Its own thread and its own channel rather than a command on the
-        // worker's queue: the worker can be minutes deep in a patch run, and
-        // "is Antigravity hitting the gate right now" is exactly the question
-        // that must still answer while it is.
-        let (gate_tx, gate_rx) = channel();
-        let gate_ctx = cc.egui_ctx.clone();
-        gate::spawn_watch(gate_tx, Box::new(move || gate_ctx.request_repaint()));
-
-        // Read once, only to pre-fill the two fields. The worker owns the file
-        // from here on — two writers each saving the whole thing meant whichever
-        // saved last silently reverted the other.
+        // The worker owns settings changes; the GUI reads the saved theme.
         let settings = Settings::load();
         theme::set_preference(&cc.egui_ctx, settings.theme);
         // The unlocker is free: no licence gate, so the first scan and auto-patch
@@ -136,25 +88,12 @@ impl App {
             worker,
             events,
             status: None,
-            gate: gate::View::default(),
-            gate_at: std::time::Instant::now(),
-            gate_rx,
             log: Vec::new(),
             log_all_selected: false,
             busy: None,
             main_view: main_view::ViewState::default(),
-            own_proxy_input: settings.own_proxy.clone(),
-            custom_dns_input: settings.custom_dns.clone(),
-            // The saved code stays in the field across restarts and updates,
-            // where it can be seen and replaced.
-            group_key_input: settings.group_key.clone(),
-            providers_local: Vec::new(),
-            providers_reordering: false,
-            vpn_path_copied: None,
             path_dialog: None,
             path_dialog_error: None,
-            report_saved: None,
-            report_clipboard_at: None,
             frames: 0,
             theme: settings.theme,
         }
@@ -164,7 +103,7 @@ impl App {
         self.busy.is_some()
     }
 
-    /// The update banner remains available on every main page.
+    /// The update banner remains available above the main controls.
     fn update_banner(&self, ui: &mut egui::Ui) {
         let Some(rel) = &self.update else { return };
         let label = format!("⬆  Доступна новая версия — {}", rel.display_version());
@@ -182,36 +121,9 @@ impl App {
         ui.add_space(10.0);
     }
 
-    /// Re-launches this exe elevated and closes the current window.
-    ///
-    /// The privileged half cannot be acquired in place — elevation is per
-    /// process on Windows and eframe owns the message loop — so the only honest
-    /// button is one that starts again. If the user dismisses the UAC prompt
-    /// nothing happens and the window stays as it was.
-    fn request_elevation(&self) {
-        #[cfg(target_os = "windows")]
-        {
-            if crate::utils::relaunch_elevated() {
-                std::process::exit(0);
-            }
-        }
-    }
-
     fn drain_events(&mut self) {
         while let Ok(rel) = self.update_rx.try_recv() {
             self.update = Some(rel);
-        }
-        while let Ok(signal) = self.gate_rx.try_recv() {
-            match signal {
-                gate::Signal::Gate(view) => {
-                    self.gate = view;
-                    self.gate_at = std::time::Instant::now();
-                }
-                // The watcher decides *when* it is worth re-measuring; the
-                // worker is the only thing that may take the measurement, so the
-                // request passes through here rather than going around it.
-                gate::Signal::MeasureVpn => self.worker.send(Cmd::RemeasureVpn),
-            }
         }
         while let Ok(ev) = self.events.try_recv() {
             match ev {
@@ -221,23 +133,9 @@ impl App {
                     }
                     self.log.push((level, line));
                 }
-                Event::Status(status) => {
-                    // The field is only refilled when the user is not mid-typing,
-                    // otherwise a status push landing between keystrokes would
-                    // overwrite what they are entering.
-                    if self.custom_dns_input.is_empty() && !status.custom_dns_text.is_empty() {
-                        self.custom_dns_input = status.custom_dns_text.clone();
-                    }
-                    // A snapshot that arrives mid-drag must not overwrite the
-                    // order under the pointer; the worker's copy is adopted
-                    // again as soon as the drag is over.
-                    if !self.providers_reordering {
-                        self.providers_local = status.providers.clone();
-                    }
-                    self.status = Some(*status);
-                }
+                Event::Status(status) => self.status = Some(*status),
                 Event::Busy(what) => self.busy = what,
-                Event::ProxySaved(cap, result) => self.main_view.proxy_saved(cap, result),
+                Event::ProxySaved(..) => {}
                 Event::Deactivated => {
                     self.busy = None;
                     self.screen = Screen::Deactivated;
@@ -298,7 +196,7 @@ pub fn run() -> Result<(), String> {
                     .with_inner_size([WIN_W, WIN_H])
                     // Width is fixed: the layout is built for one width, and
                     // only the height is the user's to change.
-                    .with_min_inner_size([WIN_W, 570.0])
+                    .with_min_inner_size([WIN_W, 350.0])
                     .with_max_inner_size([WIN_W, 4000.0])
                     .with_maximize_button(false)
                     .with_title(title());
@@ -357,7 +255,6 @@ fn without_source_location(msg: &str) -> &str {
         .and_then(|i| msg[i..].find(": ").map(|j| &msg[i + j + 2..]))
         .unwrap_or(msg)
 }
-
 
 fn title() -> String {
     format!("Antigravity Unlocker {}", update::current_version())

@@ -5,29 +5,13 @@ use eframe::egui::{self, CornerRadius, Sense, Stroke};
 use super::theme;
 
 // Glyphs from lucide-static 0.468.0, subset to these code points.
-pub const OVERVIEW: &str = "\u{e1c0}";
-pub const INTEGRATION: &str = "\u{e4fe}";
-pub const SETTINGS: &str = "\u{e244}";
-pub const LOG: &str = "\u{e10b}";
 pub const POWER: &str = "\u{e143}";
 pub const COPY: &str = "\u{e0a2}";
-pub const SEND: &str = "\u{e155}";
-pub const HEART: &str = "\u{e0f5}";
 pub const MOON: &str = "\u{e121}";
 pub const SUN: &str = "\u{e17b}";
 pub const FOLDER: &str = "\u{e246}";
-pub const CHECK: &str = "\u{e070}";
-pub const ANSWER: &str = "\u{e225}";
-pub const WAIT: &str = "\u{e08b}";
-pub const ALERT: &str = "\u{e192}";
 pub const REPAIR: &str = "\u{e1b0}";
-pub const KEY: &str = "\u{e4a7}";
-pub const ROUTE: &str = "\u{e542}";
 pub const REFRESH: &str = "\u{e148}";
-pub const DNS: &str = "\u{e0eb}";
-pub const SERVER: &str = "\u{e156}";
-pub const PROXY: &str = "\u{e41b}";
-pub const GROUP: &str = "\u{e128}";
 
 pub fn icon_text(icon: &str, label: &str, color: egui::Color32) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
@@ -41,23 +25,6 @@ pub fn icon_text(icon: &str, label: &str, color: egui::Color32) -> egui::text::L
             label,
             8.0,
             egui::TextFormat::simple(egui::FontId::proportional(13.5), color),
-        );
-    }
-    job
-}
-
-pub fn text_icon(label: &str, icon: &str, color: egui::Color32) -> egui::text::LayoutJob {
-    let mut job = egui::text::LayoutJob::default();
-    job.append(
-        label,
-        0.0,
-        egui::TextFormat::simple(egui::FontId::proportional(13.5), color),
-    );
-    if !icon.is_empty() {
-        job.append(
-            icon,
-            6.0,
-            egui::TextFormat::simple(theme::icon_font(14.0), color),
         );
     }
     job
@@ -242,29 +209,6 @@ pub fn hint(ui: &mut egui::Ui, text: &str) {
             .color(theme::palette(ui).muted)
             .size(12.5),
     );
-}
-
-/// The round «i» itself. `lit` while its text is showing.
-pub fn info_button(ui: &mut egui::Ui, lit: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::click());
-    if ui.is_rect_visible(rect) {
-        let color = if lit || resp.hovered() {
-            theme::palette(ui).accent
-        } else {
-            theme::palette(ui).muted
-        };
-        let painter = ui.painter();
-        painter.circle_stroke(rect.center(), 7.0, Stroke::new(1.2, color));
-        painter.text(
-            rect.center() + egui::vec2(0.0, 0.5),
-            egui::Align2::CENTER_CENTER,
-            "i",
-            egui::FontId::proportional(11.0),
-            color,
-        );
-    }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Что это")
 }
 
 /// A coloured status dot, for install rows and provider rows.

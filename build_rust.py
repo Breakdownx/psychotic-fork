@@ -1048,7 +1048,7 @@ def build_macos_bundle(version):
 
         with open(os.path.join(bundle, "Запустить.command"), "w", encoding="utf-8", newline="\n") as f:
             f.write(MACOS_LAUNCHER)
-        readme = os.path.join("linux", "README.md")
+        readme = "README.md"
         if os.path.exists(readme):
             shutil.copy2(readme, os.path.join(bundle, "README.md"))
 
