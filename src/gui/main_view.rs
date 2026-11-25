@@ -1,4 +1,4 @@
-//! Native navigation and pages shown after the licence gate.
+//! Native navigation and pages, available before license activation.
 
 use eframe::egui;
 use std::time::{Duration, Instant};
@@ -1520,6 +1520,15 @@ mod panel_tests {
             });
             output.drop_without_applying_deltas();
         }
+    }
+
+    #[test]
+    fn navigation_starts_on_overview_and_can_open_settings_without_setup() {
+        let mut view = ViewState::default();
+        assert_eq!(view.page, Page::Overview);
+        view.open(Page::Settings);
+        assert_eq!(view.page, Page::Settings);
+        assert!(view.setup.is_none());
     }
 
     #[test]

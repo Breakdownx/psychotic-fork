@@ -294,10 +294,9 @@ pub enum Event {
 
 /// UI → worker.
 pub enum Cmd {
-    /// The UI accepted a licence key. Auto-patch may now act on the initial scan.
+    /// The UI is up. Auto-patch may now act on the initial scan. Sent once at
+    /// startup (the unlocker is free — there is no licence gate to pass first).
     Unlocked,
-    /// Store the licence key just accepted, so the next start skips the screen.
-    RememberLicense(String),
     /// Persist the user's UI theme preference.
     SetTheme(crate::settings::ThemeMode),
     /// Ask the system again where the client's traffic leaves.
@@ -481,12 +480,6 @@ fn run_worker(
     while let Ok(cmd) = rx.recv() {
         match cmd {
             Cmd::Stop => return,
-            Cmd::RememberLicense(key) => {
-                if ctx.settings.license_key != key {
-                    ctx.settings.license_key = key;
-                    ctx.settings.save();
-                }
-            }
             Cmd::SetTheme(mode) => {
                 if ctx.settings.theme != mode {
                     ctx.settings.theme = mode;

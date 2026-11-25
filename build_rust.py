@@ -12,11 +12,6 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-# Must match src\auth.rs (LICENSE_VERSION_SEP): the license key is derived from
-# base_secret + SEP + MAJOR.MINOR, so a key holds for every patch of a minor.
-LICENSE_VERSION_SEP = "::"
-
-
 def read_canary_const(name, canary_rs_path=r"src\canary.rs"):
     """Reads a committed const out of src/canary.rs. Same single-source-of-truth
     trick as read_base_secret, so build.rs, the binary, this script and
@@ -1093,23 +1088,12 @@ def build_macos_bundle(version):
         return None
 
 
-def read_base_secret(auth_rs_path):
-    """Reads the committed base secret straight from src\\auth.rs, so the source
-    is the single source of truth for both the binary and the key generator."""
-    with open(auth_rs_path, 'r', encoding='utf-8') as f:
-        src = f.read()
-    m = re.search(r'const\s+LICENSE_BASE_SECRET\s*:\s*&str\s*=\s*"([^"]*)"', src)
-    if not m:
-        raise RuntimeError("LICENSE_BASE_SECRET not found in src/auth.rs")
-    return m.group(1)
-
-
 def main():
     # Set correct working directory to where this script is located
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     print("[INFO] Starting build process...")
 
-    VERSION = "2.35.0"
+    VERSION = "2.35.1"
     version = VERSION
     # env!("CARGO_PKG_VERSION") only sees MAJOR.MINOR.PATCH, so the key salt uses
     # the same trimmed value the binary will compile with.
@@ -1123,189 +1107,20 @@ def main():
     cargo_version = ".".join(version.split("_")[0].split(".")[:3])
     print(f"[INFO] Build version: {version}")
 
-    # `.secrets.json` is now purely an owner marker: when present, this machine
-    # is the author's, so the key generator is produced and fresh keys printed.
-    # A clone from GitHub has no such file, so it builds a working binary but
-    # generates NO keys - users must fetch a free key from t.me/nova_txt.
-    is_owner = os.path.exists(".secrets.json")
-
+    # Keys removed: the unlocker is free. Nothing here reads a secret from the
+    # sources or mints licence keys any more.
     main_rs_path = r"src\main.rs"
-    auth_rs_path = r"src\auth.rs"
-
-    # The secret is committed in the sources; the key generator derives from the
-    # exact same base + version salt, so its keys always match this build.
-    base_secret = read_base_secret(auth_rs_path)
-    # Keys are bound to MAJOR.MINOR only (src/auth.rs::license_version): 2.32.1's
-    # key also opens 2.32.4.
-    license_version = ".".join(cargo_version.split(".")[:2])
-    key_secret_phrase = f"{base_secret}{LICENSE_VERSION_SEP}{license_version}"
-
-    keygen_code = "SECRET_PHRASE = " + repr(key_secret_phrase) + chr(10) + """
-import hashlib
-import random
-import string
-
-VERSION = SECRET_PHRASE.rsplit('::', 1)[-1]
-MARK = '67'  # every key ends with these two digits
-NL = chr(10)
-
-
-def generate_key():
-    # The key must END with the mark. The tail is the hash signature, so draw
-    # nonces until it ends in '67': 1 in 256 on average, well under a millisecond.
-    chars = string.ascii_uppercase + string.digits
-    while True:
-        nonce = ''.join(random.choices(chars, k=12))
-        data = (nonce + SECRET_PHRASE).encode('utf-8')
-        signature = hashlib.sha256(data).hexdigest().upper()[:12]
-        if signature.endswith(MARK):
-            return nonce + signature
-
-
-def telegram_text(key):
-    # Backticks make the key monospace (tap-to-copy) once sent in Telegram.
-    return 'Ключ для v' + VERSION + '.x' + NL + NL + '`' + key + '`'
-
-
-def html_clip(key):
-    # CF_HTML: only the key is <code>, the sentence stays plain.
-    crlf = chr(13) + chr(10)
-    frag = 'Ключ для v' + VERSION + '.x<br><br><code>' + key + '</code>'
-    pre = '<html><body><!--StartFragment-->'
-    post = '<!--EndFragment--></body></html>'
-    head = 'Version:0.9' + crlf + 'StartHTML:%010d' + crlf + 'EndHTML:%010d' + crlf + 'StartFragment:%010d' + crlf + 'EndFragment:%010d' + crlf
-    n = len((head % (0, 0, 0, 0)).encode('utf-8'))
-    b = lambda s: len(s.encode('utf-8'))
-    sh = n
-    sf = sh + b(pre)
-    ef = sf + b(frag)
-    eh = ef + b(post)
-    return ((head % (sh, eh, sf, ef)) + pre + frag + post).encode('utf-8') + bytes(1)
-
-
-def copy_to_clipboard(root, text, html=None):
-    # Windows clipboard directly, so the text survives closing the window.
-    try:
-        import ctypes
-        from ctypes import wintypes
-        u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
-        k32.GlobalAlloc.restype = wintypes.HGLOBAL
-        k32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
-        k32.GlobalLock.restype = ctypes.c_void_p
-        k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
-        k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
-        u32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
-        u32.OpenClipboard.argtypes = [wintypes.HWND]
-        data = (text + chr(0)).encode('utf-16-le')
-        if not u32.OpenClipboard(None):
-            raise OSError('clipboard busy')
-        try:
-            u32.EmptyClipboard()
-            h = k32.GlobalAlloc(0x0002, len(data))  # GMEM_MOVEABLE
-            p = k32.GlobalLock(h)
-            ctypes.memmove(p, data, len(data))
-            k32.GlobalUnlock(h)
-            u32.SetClipboardData(13, h)  # CF_UNICODETEXT
-            if html:
-                u32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
-                fmt = u32.RegisterClipboardFormatW('HTML Format')
-                h2 = k32.GlobalAlloc(0x0002, len(html))
-                p2 = k32.GlobalLock(h2)
-                ctypes.memmove(p2, html, len(html))
-                k32.GlobalUnlock(h2)
-                u32.SetClipboardData(fmt, h2)
-        finally:
-            u32.CloseClipboard()
-        return True
-    except Exception:
-        try:
-            root.clipboard_clear()
-            root.clipboard_append(text)
-            root.update()
-            return True
-        except Exception:
-            return False
-
-
-def main():
-    import tkinter as tk
-
-    root = tk.Tk()
-    root.title('Antigravity Keygen v' + VERSION)
-    root.geometry('440x250')
-    root.resizable(False, False)
-    root.configure(bg='#1e1e2e')
-
-    tk.Label(root, text='Ключ для Telegram', bg='#1e1e2e', fg='#89b4fa',
-             font=('Segoe UI', 15, 'bold')).pack(pady=(14, 8))
-    preview = tk.Label(root, bg='#181825', fg='#a6e3a1', font=('Consolas', 13, 'bold'),
-                       justify='left', anchor='w', padx=14, pady=10)
-    preview.pack(fill='x', padx=20)
-    status = tk.Label(root, bg='#1e1e2e', fg='#a6adc8', font=('Segoe UI', 10))
-    status.pack(pady=8)
-
-    state = {'text': '', 'html': None}
-
-    def new_key():
-        key = generate_key()
-        state['html'] = html_clip(key)
-        state['text'] = telegram_text(key)
-        preview.config(text=state['text'].replace('`', ''))
-        copy()
-
-    def copy():
-        ok = copy_to_clipboard(root, state['text'], state['html'])
-        status.config(text='Скопировано - вставляйте в Telegram' if ok else 'Не удалось скопировать',
-                      fg='#a6e3a1' if ok else '#f38ba8')
-
-    row = tk.Frame(root, bg='#1e1e2e')
-    row.pack(pady=6)
-    style = dict(bg='#313244', fg='#cdd6f4', activebackground='#45475a', activeforeground='#ffffff',
-                 font=('Segoe UI', 11, 'bold'), bd=0, height=2, width=18, cursor='hand2')
-    tk.Button(row, text='Копировать', command=copy, **style).pack(side='left', padx=8)
-    tk.Button(row, text='Новый ключ', command=new_key, **style).pack(side='left', padx=8)
-
-    new_key()
-    root.mainloop()
-
-
-if __name__ == '__main__':
-    main()
-"""
-
-    dist_keygen_path = "dist_keygen.py"
-    dist_keygen_gui_path = "dist_keygen.pyw"
 
     try:
-        # 1. Sync the version in Cargo.toml so env!("CARGO_PKG_VERSION") - which
-        #    both the binary and the key salt use - matches this release.
+        # 1. Sync the version in Cargo.toml so env!("CARGO_PKG_VERSION") matches
+        #    this release.
         with open("Cargo.toml", 'r', encoding='utf-8') as f:
             cargo_content = f.read()
         cargo_content = re.sub(r'^version\s*=\s*"[^"]*"', f'version = "{cargo_version}"', cargo_content, flags=re.MULTILINE)
         with open("Cargo.toml", 'w', encoding='utf-8') as f:
             f.write(cargo_content)
 
-        # 2. Owner-only: (re)generate the key generator for THIS version. Never
-        #    created on a plain clone from GitHub - those builds ship no keys.
-        if is_owner:
-            with open(dist_keygen_path, 'w', encoding='utf-8') as f:
-                f.write(keygen_code)
-            # Same code, .pyw: double-click opens the window with no console.
-            with open(dist_keygen_gui_path, 'w', encoding='utf-8') as f:
-                f.write(keygen_code)
-            # Double-click launcher: .pyw has no file association on every PC.
-            q = '"'
-            vbs = (
-                f'Set sh = CreateObject({q}WScript.Shell{q})\r\n'
-                f'Set fso = CreateObject({q}Scripting.FileSystemObject{q})\r\n'
-                'dir = fso.GetParentFolderName(WScript.ScriptFullName)\r\n'
-                'sh.CurrentDirectory = dir\r\n'
-                f'sh.Run {q}pythonw {q}{q}{q} & dir & {q}\\{dist_keygen_gui_path}{q}{q}{q}, 0, False\r\n'
-            )
-            with open("dist_keygen.vbs", 'w', encoding='ascii', newline='') as f:
-                f.write(vbs)
-
-        # 3. Build the release binary (only the main target). No source edits are
+        # 2. Build the release binary (only the main target). No source edits are
         #    made, so there is nothing sensitive that could be left behind.
         print("[INFO] Запуск компиляции (Release mode)...")
         cargo_env = os.environ.copy()
@@ -1375,17 +1190,7 @@ if __name__ == '__main__':
             print(f"[INFO] target\\ (cargo test, rust-analyzer): удалено {_mb(freed)} того, "
                   f"что не использовалось {DEV_CACHE_KEEP_DAYS} дней.")
 
-        if is_owner:
-            print(f"Ваш генератор ключей для этой версии: {dist_keygen_path}")
-            print(f"\n[i] Ключи привязаны к линейке {license_version}.x: подходят ко всем")
-            print("    патчам линейки; после смены первых двух чисел VERSION людям")
-            print("    понадобится новый ключ из t.me/nova_txt.")
-            # Auto-generate some keys for convenience.
-            print(f"\n5 ключей для версии {cargo_version}:")
-            # -B: no __pycache__ left beside the sources for one import.
-            subprocess.check_call(["python", "-B", "-c", "import dist_keygen; print(dist_keygen.generate_key())"])
-        else:
-            print("\nДля работы необходим ключ - получить его можно бесплатно в группе t.me/nova_txt")
+        print("\n[INFO] Анлокер бесплатный: ключ не нужен.")
 
     except subprocess.CalledProcessError as e:
         # No cache is pruned after a failed build: see "Build caches" above.
