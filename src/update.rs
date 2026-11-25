@@ -15,9 +15,26 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection};
 use serde::{Deserialize, Serialize};
 
-pub const RELEASES_LATEST_URL: &str = "https://github.com/confeden/Antigravity/releases/latest";
+/// The GitHub repository whose releases this build checks, as `owner/name`.
+///
+/// CI sets `AG_RELEASES_REPO` to the repository it builds in, so a build of
+/// any fork offers that fork's releases - its own platforms and its own
+/// changes - and not another project's. A local build checks this fork.
+pub const RELEASES_REPO: &str = match option_env!("AG_RELEASES_REPO") {
+    Some(repo) => repo,
+    None => "Breakdownx/psychotic-fork",
+};
+
+/// Where the "new version" button and line send the user: always `/latest`.
+pub fn releases_latest_url() -> String {
+    format!("https://github.com/{RELEASES_REPO}/releases/latest")
+}
+
 const API_HOST: &str = "api.github.com";
-const API_PATH: &str = "/repos/confeden/Antigravity/releases/latest";
+
+fn api_path() -> String {
+    format!("/repos/{RELEASES_REPO}/releases/latest")
+}
 const CHECK_INTERVAL: Duration = Duration::from_secs(8 * 60 * 60);
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -83,7 +100,11 @@ struct CachedCheck {
 
 /// Returns the path to the update check cache file in the system temp directory.
 fn cache_path() -> PathBuf {
-    std::env::temp_dir().join("ag_unlocker_update_cache.json")
+    // Per repository: a check cached against another one must not be offered.
+    std::env::temp_dir().join(format!(
+        "ag_unlocker_update_cache_{}.json",
+        RELEASES_REPO.replace(['/', '\\'], "_")
+    ))
 }
 
 /// Compares two version strings (e.g. "v2.11.0_4" vs "2.11.0_1", "2.11.0" vs "2.10.0").
@@ -206,7 +227,7 @@ pub fn fetch_latest_release() -> Result<ReleaseInfo, String> {
          User-Agent: ag_unlocker/{}\r\n\
          Accept: application/vnd.github.v3+json\r\n\
          Connection: close\r\n\r\n",
-        API_PATH,
+        api_path(),
         API_HOST,
         current_version()
     );
@@ -359,6 +380,18 @@ pub fn spawn_watch(tx: std::sync::mpsc::Sender<ReleaseInfo>, wake: Box<dyn Fn() 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_release_links_name_one_repository() {
+        assert_eq!(RELEASES_REPO.matches('/').count(), 1, "{RELEASES_REPO}");
+        assert_eq!(
+            releases_latest_url(),
+            format!("https://github.com/{RELEASES_REPO}/releases/latest")
+        );
+        assert_eq!(api_path(), format!("/repos/{RELEASES_REPO}/releases/latest"));
+        // The repository's slash must not turn the cache name into a subdirectory.
+        assert_eq!(cache_path().parent(), Some(std::env::temp_dir().as_path()));
+    }
 
     #[test]
     fn test_current_version_not_empty() {

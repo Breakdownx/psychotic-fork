@@ -109,7 +109,7 @@ impl App {
             // Always /latest, never the tag URL from the API response: the point
             // is to land the user on whatever is newest when they click, not on
             // the release this process happened to see hours ago.
-            crate::utils::open_url(update::RELEASES_LATEST_URL);
+            crate::utils::open_url(&update::releases_latest_url());
         }
         ui.add_space(10.0);
     }

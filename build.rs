@@ -35,6 +35,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/canary.rs");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=AG_FULL_VERSION");
+    println!("cargo:rerun-if-env-changed=AG_RELEASES_REPO");
 
     if let Ok(full_ver) = env::var("AG_FULL_VERSION") {
         let trimmed = full_ver.trim();

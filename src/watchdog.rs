@@ -386,7 +386,12 @@ fn repatch(target: &Path) -> RepatchOutcome {
     if target.extension().and_then(|e| e.to_str()) == Some("js") {
         patch_ide::repatch_ide_js(target)
     } else {
-        patch_binary::repatch_if_needed(target)
+        let outcome = patch_binary::repatch_if_needed(target);
+        #[cfg(target_os = "macos")]
+        if matches!(outcome, RepatchOutcome::Repatched(_)) {
+            patch_binary::restart_after_patch(target);
+        }
+        outcome
     }
 }
 

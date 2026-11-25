@@ -1,7 +1,7 @@
-name: macOS (arm64)
+name: macOS
 
-# Tests on every push and pull request; the Apple Silicon distribution on a tag
-# (v*) or by hand. Both on a native macOS runner.
+# Tests on every push and pull request; the macOS distribution on a tag (v*) or
+# by hand, published as a GitHub release with the DMG attached.
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: "Attach the bundle to a GitHub release for this tag (e.g. v2.28.2). Empty = artifact only."
+        description: "Publish the build as the GitHub release for this tag (e.g. v2.35.1). Empty = workflow artifact only."
         required: false
         default: ""
 
@@ -20,7 +20,9 @@ permissions:
 
 jobs:
   test:
-    runs-on: macos-14 # Apple Silicon
+    # Apple Silicon. A pinned image (macos-14) is retired sooner or later, and a
+    # retired one cancels every run before a step starts.
+    runs-on: macos-latest
     env:
       # Every target is warning-free since the crate-wide allow went; keep it so.
       RUSTFLAGS: -D warnings
@@ -36,7 +38,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: macos-arm64-test
+          key: macos-test
 
       - name: Test
         run: cargo test --locked --bin ag_unlocker --target aarch64-apple-darwin
@@ -44,7 +46,7 @@ jobs:
   build:
     needs: test
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -52,16 +54,19 @@ jobs:
         run: |
           rustup set profile minimal
           rustup default stable
-          rustup target add aarch64-apple-darwin
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
           rustc -V
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: macos-arm64
+          key: macos-release
 
       # The same script as a local build, so the two cannot drift.
       - name: Build and assemble
         id: pack
+        env:
+          # The window offers this repository's releases (src/update.rs).
+          AG_RELEASES_REPO: ${{ github.repository }}
         run: |
           mkdir -p dist
           macos/build.sh --out dist | tee build.out
@@ -76,13 +81,25 @@ jobs:
             ${{ steps.pack.outputs.tgz }}
           if-no-files-found: error
 
-      - name: Attach to release
-        # On a tag push, or when a tag was given to workflow_dispatch.
+      - name: Publish the release
+        # On a tag push, or when a tag was given to workflow_dispatch. Creates the
+        # release when the tag has none yet, otherwise replaces its files.
         if: startsWith(github.ref, 'refs/tags/v') || inputs.release != ''
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release != '' && inputs.release || github.ref_name }}
+          VERSION: ${{ steps.pack.outputs.version }}
         run: |
-          gh release upload "$TAG" "${{ steps.pack.outputs.dmg }}" "${{ steps.pack.outputs.app_zip }}" \
-            "${{ steps.pack.outputs.tgz }}" \
-            --clobber --repo "$GITHUB_REPOSITORY"
+          files=("${{ steps.pack.outputs.dmg }}" "${{ steps.pack.outputs.app_zip }}" "${{ steps.pack.outputs.tgz }}")
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Antigravity Unlocker $VERSION" \
+              --notes "Mac (Apple Silicon и Intel), macOS 13 или новее.
+
+          **Установка:** скачайте \`Psychotic_AG_Fork.dmg\`, откройте его и перетащите Antigravity Unlocker в «Программы». Первый запуск и право «Управление приложениями» описаны в README внутри образа.
+
+          Также: \`…_app-local.zip\` — то же приложение в zip; \`…_macos.tar.gz\` — запасной вариант с \`Запустить.command\`."
+          fi

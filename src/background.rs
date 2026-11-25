@@ -617,15 +617,62 @@ mod unix_impl {
         PathBuf::from(base)
     }
 
-    /// The proxy's own copy of the exe, under the XDG data dir - a user unit needs
-    /// no root, so unlike Windows there is no `%ProgramData%` anti-persistence
-    /// dance.
+    /// The service's own copy of the exe, under the XDG data dir - a user unit
+    /// needs no root, so unlike Windows there is no `%ProgramData%`
+    /// anti-persistence dance.
     pub fn install_dir() -> PathBuf {
         xdg("XDG_DATA_HOME", ".local/share").join("agunlocker")
     }
 
+    /// The exe the background service runs.
+    ///
+    /// macOS: a copy of the whole `.app` when this process runs from one, so
+    /// the service is the same signed app - the same bundle id and code hash -
+    /// as the one the user grants App Management to, rather than a bare binary
+    /// that needs a grant of its own; a bare `ag_watchdog` otherwise. Both
+    /// replace `ag_proxy`, the name left from the removed proxy
+    /// (`remove_other_service_copies`).
     pub fn installed_exe() -> PathBuf {
-        install_dir().join("ag_proxy")
+        #[cfg(target_os = "macos")]
+        {
+            service_exe_for(own_bundle().is_some())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            install_dir().join("ag_proxy")
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    const SERVICE_APP: &str = "Antigravity Unlocker.app";
+    #[cfg(target_os = "macos")]
+    const SERVICE_BIN: &str = "ag_watchdog";
+    #[cfg(target_os = "macos")]
+    const LEGACY_SERVICE_BIN: &str = "ag_proxy";
+
+    /// The `.app` this process runs inside, if any.
+    #[cfg(target_os = "macos")]
+    fn own_bundle() -> Option<PathBuf> {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| crate::macos::bundle_of(&exe))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn service_exe_for(bundled: bool) -> PathBuf {
+        if bundled {
+            let name = std::env::current_exe()
+                .ok()
+                .and_then(|e| e.file_name().map(|n| n.to_os_string()))
+                .unwrap_or_else(|| "ag_unlocker".into());
+            install_dir()
+                .join(SERVICE_APP)
+                .join("Contents")
+                .join("MacOS")
+                .join(name)
+        } else {
+            install_dir().join(SERVICE_BIN)
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -718,6 +765,10 @@ mod unix_impl {
     /// Puts this exe where the units run it from. True when the copy on disk
     /// changed (a unit already running it then has to be restarted).
     fn install_copy() -> Result<bool, String> {
+        #[cfg(target_os = "macos")]
+        if let Some(app) = own_bundle() {
+            return install_bundle_copy(&app);
+        }
         let src = std::env::current_exe().map_err(|e| format!("нет пути к exe: {}", e))?;
         let dir = install_dir();
         let exe = installed_exe();
@@ -735,7 +786,7 @@ mod unix_impl {
         let replaced = src != exe && !same_contents(&src, &exe);
         if replaced {
             use std::os::unix::fs::PermissionsExt;
-            let fresh = dir.join(".ag_proxy.new");
+            let fresh = dir.join(".service.new");
             fs::copy(&src, &fresh).map_err(|e| format!("копия exe: {}", e))?;
             let _ = fs::set_permissions(&fresh, fs::Permissions::from_mode(0o755));
             // A copy of a browser download keeps its quarantine flag, and
@@ -748,6 +799,84 @@ mod unix_impl {
             })?;
         }
         Ok(replaced)
+    }
+
+    /// macOS: copies the whole `.app` the window runs from to `SERVICE_APP`, with
+    /// `ditto` so the signature and the bundle layout come across intact. A
+    /// directory cannot be renamed over a non-empty one, so the old copy is moved
+    /// aside first; a service still running from it keeps its open image.
+    #[cfg(target_os = "macos")]
+    fn install_bundle_copy(app: &std::path::Path) -> Result<bool, String> {
+        let exe_name = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "ag_unlocker".into());
+        install_bundle_copy_into(app, &install_dir(), &exe_name)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn install_bundle_copy_into(
+        app: &std::path::Path,
+        dir: &std::path::Path,
+        exe_name: &str,
+    ) -> Result<bool, String> {
+        let dst = dir.join(SERVICE_APP);
+        if app == dst {
+            // The service's own copy asking to reinstall itself.
+            return Ok(false);
+        }
+        fs::create_dir_all(dir).map_err(|e| format!("не создать {}: {}", dir.display(), e))?;
+        let same = |rel: &[&str]| {
+            let a = rel.iter().fold(app.to_path_buf(), |p, s| p.join(s));
+            let b = rel.iter().fold(dst.clone(), |p, s| p.join(s));
+            same_contents(&a, &b)
+        };
+        if same(&["Contents", "MacOS", exe_name]) && same(&["Contents", "Info.plist"]) {
+            return Ok(false);
+        }
+        let fresh = dir.join(".service.app.new");
+        let old = dir.join(".service.app.old");
+        let _ = fs::remove_dir_all(&fresh);
+        let _ = fs::remove_dir_all(&old);
+        let copied = std::process::Command::new("/usr/bin/ditto")
+            .arg(app)
+            .arg(&fresh)
+            .status()
+            .map_err(|e| format!("ditto не запустился: {}", e))?;
+        if !copied.success() {
+            let _ = fs::remove_dir_all(&fresh);
+            return Err(format!("копия приложения не удалась (ditto: {})", copied));
+        }
+        crate::macos::strip_quarantine(&fresh);
+        if dst.exists() {
+            fs::rename(&dst, &old).map_err(|e| format!("замена приложения: {}", e))?;
+        }
+        if let Err(e) = fs::rename(&fresh, &dst) {
+            // Put the previous copy back rather than leave the service nothing.
+            let _ = fs::rename(&old, &dst);
+            let _ = fs::remove_dir_all(&fresh);
+            return Err(format!("замена приложения: {}", e));
+        }
+        let _ = fs::remove_dir_all(&old);
+        Ok(true)
+    }
+
+    /// macOS: removes the service copies the current one replaced - the bare
+    /// binary or the bundle, whichever is not in use, and the old `ag_proxy`.
+    /// Called once the agent points at the new copy, so nothing runs from these.
+    #[cfg(target_os = "macos")]
+    fn remove_other_service_copies() {
+        let current = installed_exe();
+        let dir = install_dir();
+        for bin in [SERVICE_BIN, LEGACY_SERVICE_BIN] {
+            let path = dir.join(bin);
+            if path != current {
+                let _ = fs::remove_file(path);
+            }
+        }
+        if !current.starts_with(dir.join(SERVICE_APP)) {
+            let _ = fs::remove_dir_all(dir.join(SERVICE_APP));
+        }
     }
 
     /// Whether two files hold the same bytes. Unreadable counts as different, so
@@ -892,6 +1021,7 @@ mod unix_impl {
         if replaced && !changed && !crate::macos::agent_restart(WATCHDOG_LABEL) {
             return Err("автопатч записан, но служба не перезапустилась (launchctl)".to_string());
         }
+        remove_other_service_copies();
         Ok(())
     }
 
@@ -905,9 +1035,55 @@ mod unix_impl {
         crate::macos::agent_remove(PROXY_LABEL);
         // Removing the proxy agent must not remove the live watchdog's image.
         if !is_watchdog_enabled() && !crate::macos::agent_is_running(WATCHDOG_LABEL) {
-            let _ = fs::remove_file(installed_exe());
-            let _ = fs::remove_dir(install_dir());
+            let dir = install_dir();
+            let _ = fs::remove_dir_all(dir.join(SERVICE_APP));
+            let _ = fs::remove_file(dir.join(SERVICE_BIN));
+            let _ = fs::remove_file(dir.join(LEGACY_SERVICE_BIN));
+            let _ = fs::remove_dir(&dir);
         }
         Ok(())
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_service_runs_the_app_copy_or_a_bare_watchdog() {
+            let app = service_exe_for(true);
+            assert!(app.starts_with(install_dir().join(SERVICE_APP).join("Contents/MacOS")));
+            assert_eq!(service_exe_for(false), install_dir().join(SERVICE_BIN));
+        }
+
+        /// The copy is the whole bundle, made once, replaced only when the app
+        /// changed, and a replacement leaves no `.new`/`.old` beside it.
+        #[test]
+        fn the_app_is_copied_whole_and_only_when_it_changed() {
+            let base = std::env::temp_dir().join(format!("ag_service_copy_{}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            let app = base.join("src").join("Antigravity Unlocker.app");
+            fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+            fs::write(app.join("Contents/MacOS/ag_unlocker"), b"v1").unwrap();
+            fs::write(app.join("Contents/Info.plist"), b"<plist/>").unwrap();
+            let dir = base.join("data");
+
+            assert_eq!(install_bundle_copy_into(&app, &dir, "ag_unlocker"), Ok(true));
+            let copy = dir.join(SERVICE_APP);
+            assert_eq!(fs::read(copy.join("Contents/MacOS/ag_unlocker")).unwrap(), b"v1");
+            assert_eq!(install_bundle_copy_into(&app, &dir, "ag_unlocker"), Ok(false));
+
+            fs::write(app.join("Contents/MacOS/ag_unlocker"), b"v2").unwrap();
+            assert_eq!(install_bundle_copy_into(&app, &dir, "ag_unlocker"), Ok(true));
+            assert_eq!(fs::read(copy.join("Contents/MacOS/ag_unlocker")).unwrap(), b"v2");
+            let leftovers: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(leftovers, vec![SERVICE_APP.to_string()]);
+            // The service's own copy asking again is a no-op.
+            assert_eq!(install_bundle_copy_into(&copy, &dir, "ag_unlocker"), Ok(false));
+            fs::remove_dir_all(&base).ok();
+        }
     }
 }

@@ -159,6 +159,23 @@ fn kill_exact(bin: &Path) {
         .ok();
 }
 
+/// Makes a running language server pick up the patch it was just given.
+///
+/// On macOS nothing locks a running binary, so the rename lands under a live
+/// server - typically the one Antigravity started from the fresh, unpatched
+/// file right after an update - and that process keeps the old image and keeps
+/// failing the gate until the app is restarted. Windows never gets here: its
+/// lock fails the write, and the watcher closes the app instead. A server
+/// inside an app bundle is stopped by its exact path so the app starts it again
+/// from the patched file (Desktop does, D22). The CLI is left alone: a running
+/// `agy` is a session the user is typing into.
+#[cfg(target_os = "macos")]
+pub fn restart_after_patch(bin: &Path) {
+    if crate::macos::bundle_of(bin).is_some() {
+        kill_exact(bin);
+    }
+}
+
 /// `^<path>( |$)` with the path's ERE metacharacters escaped.
 #[cfg(not(target_os = "windows"))]
 fn exact_command_pattern(bin: &Path) -> String {
@@ -908,6 +925,51 @@ pub fn inspect_install(install: &std::path::Path) -> InstallState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole macOS write path on a real Mach-O: patch, re-sign the temp
+    /// before the rename, keep the mode. Apple Silicon kills a binary whose
+    /// signature no longer matches at exec (S80), so "it ran and printed the new
+    /// name" is the check, with `codesign --verify` on top.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_patched_mach_o_is_resigned_and_still_runs() {
+        let (from, to) = field_signatures();
+        let (from, to) = (
+            std::str::from_utf8(&from).unwrap().to_string(),
+            std::str::from_utf8(&to).unwrap().to_string(),
+        );
+        let dir = std::env::temp_dir().join(format!("ag_macho_patch_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("ls.c");
+        let bin = dir.join("language_server");
+        fs::write(
+            &src,
+            format!("#include <stdio.h>\nint main(void) {{ puts(\"user {from} gate\"); return 0; }}\n"),
+        )
+        .unwrap();
+        let built = Command::new("cc").arg("-o").arg(&bin).arg(&src).status();
+        if !built.is_ok_and(|s| s.success()) {
+            eprintln!("no C compiler: skipped");
+            fs::remove_dir_all(&dir).ok();
+            return;
+        }
+
+        let outcome = repatch_if_needed(&bin);
+        assert!(matches!(outcome, RepatchOutcome::Repatched(n) if n >= 1), "{outcome:?}");
+
+        let out = Command::new(&bin).output().expect("the patched binary starts");
+        assert!(out.status.success(), "refused at exec: {:?}", out.status);
+        let printed = String::from_utf8_lossy(&out.stdout);
+        assert!(printed.contains(&to) && !printed.contains(&from), "{printed}");
+        let verified = Command::new("/usr/bin/codesign")
+            .args(["--verify", "--strict"])
+            .arg(&bin)
+            .status()
+            .unwrap();
+        assert!(verified.success(), "the signature does not verify");
+        assert_eq!(repatch_if_needed(&bin), RepatchOutcome::AlreadyPatched);
+        fs::remove_dir_all(&dir).ok();
+    }
 
     #[cfg(not(target_os = "windows"))]
     #[test]

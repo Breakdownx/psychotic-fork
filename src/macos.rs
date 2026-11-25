@@ -429,10 +429,10 @@ mod tests {
 
     #[test]
     fn the_grant_names_the_app_the_service_or_the_terminal() {
-        let service = Path::new("/Users/x/.local/share/agunlocker/ag_proxy");
+        let service = Path::new("/Users/x/.local/share/agunlocker/ag_watchdog");
         let app = Path::new("/Applications/Antigravity Unlocker.app/Contents/MacOS/ag_unlocker");
         assert_eq!(grantee_for(Some(app), service), "«Antigravity Unlocker»");
-        assert!(grantee_for(Some(service), service).starts_with("«ag_proxy»"));
+        assert!(grantee_for(Some(service), service).starts_with("«ag_watchdog»"));
         let bare = Path::new("/Users/x/Downloads/AG_2.35.1_macos/ag_unlocker");
         assert_eq!(grantee_for(Some(bare), service), TERMINAL_GRANTEE);
         assert_eq!(grantee_for(None, service), TERMINAL_GRANTEE);

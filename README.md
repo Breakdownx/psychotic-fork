@@ -1,10 +1,10 @@
 # Antigravity Unlocker 2.35.1 для Mac
 
-Сборка для Mac с Apple Silicon (серия M), macOS 13 или новее.
+Сборка для Mac с Apple Silicon и Intel, macOS 13 или новее.
 
 ## Установка
 
-Откройте `AG_2.35.1_macOS_arm64-local.dmg`, перетащите **Antigravity Unlocker** на ярлык **Applications** и откройте приложение из «Программ». На вкладке **«Обзор»** нажмите **«Проверить»**, чтобы увидеть состояние установленных клиентов.
+Скачайте [`Psychotic_AG_Fork.dmg`](https://github.com/Breakdownx/psychotic-fork/releases/latest/download/Psychotic_AG_Fork.dmg) из [последнего релиза](https://github.com/Breakdownx/psychotic-fork/releases/latest), откройте его, перетащите **Antigravity Unlocker** на ярлык **Applications** и откройте приложение из «Программ». На вкладке **«Обзор»** нажмите **«Проверить»**, чтобы увидеть состояние установленных клиентов.
 
 Первый запуск, право «Управление приложениями», запуск из Терминала и запасной вариант с `Запустить.command` описаны в [macos/README.md](macos/README.md). Тот же текст лежит внутри образа.
 
@@ -14,7 +14,14 @@
 macos/build.sh
 ```
 
-Скрипт собирает релизный бинарник и кладёт в `release/` образ DMG, ZIP с приложением и запасную папку с `.tar.gz`. CI ([.github/workflows/macos.yml](.github/workflows/macos.yml)) прогоняет тесты на каждый push и запускает этот же скрипт по тегу `v*`. Подпись Developer ID и нотарификация описаны в [docs/обновление-antigravity.md](docs/обновление-antigravity.md).
+Скрипт собирает универсальный бинарник (Apple Silicon и Intel; `--arm64-only` — быстрее, только Apple Silicon) и кладёт в `release/` образ `Psychotic_AG_Fork.dmg`, ZIP с приложением и запасную папку с `.tar.gz`. CI ([.github/workflows/macos.yml](.github/workflows/macos.yml)) прогоняет тесты на каждый push, а по тегу `v*` запускает этот же скрипт и публикует релиз с этими файлами:
+
+```sh
+git tag v2.35.1
+git push origin v2.35.1
+```
+
+Подпись Developer ID и нотарификация описаны в [docs/обновление-antigravity.md](docs/обновление-antigravity.md).
 
 ## Проверка без изменений
 

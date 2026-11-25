@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Builds the macOS (Apple Silicon) distribution: the .app, as a drag-to-install
-# .dmg and as a .zip, and the fallback folder bundle (bare binary + double-click
-# launcher) as a .tar.gz.
-#
-# Signed ad hoc, so the app and image names carry `-local`, the convention the
-# release guide uses for builds Gatekeeper has not been shown by Apple
-# (docs/обновление-antigravity.md, «Выпуск для Mac»).
+# Builds the macOS distribution: the .app, as a drag-to-install .dmg and as a
+# .zip, and the fallback folder bundle (bare binary + double-click launcher) as
+# a .tar.gz. Universal (Apple Silicon + Intel) unless --arm64-only.
 #
 #   macos/build.sh                 build, then assemble into release/
 #   macos/build.sh --out DIR       assemble into DIR instead
-#   macos/build.sh --skip-build    reuse the last release binary
+#   macos/build.sh --arm64-only    one slice, for a quicker local build
+#   macos/build.sh --skip-build    reuse the last release binaries
+#
+# Signed ad hoc: Gatekeeper asks once on first launch of a downloaded copy.
+# Developer ID signing and notarization are the manual steps in
+# docs/обновление-antigravity.md («Выпуск для Mac»).
 #
 # Used by CI (.github/workflows/macos.yml) and by hand, so the two cannot drift.
 # Everything it ships comes from this folder (README.md, Info.plist,
@@ -20,46 +21,68 @@ cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 OUT="$ROOT/release"
 BUILD=1
+TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)
 while [ $# -gt 0 ]; do
   case "$1" in
     --out) OUT=$(cd "$2" && pwd); shift 2 ;;
     --skip-build) BUILD=0; shift ;;
+    --arm64-only) TARGETS=(aarch64-apple-darwin); shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-TARGET=aarch64-apple-darwin
 VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 # A 4th-digit build 2.28.2.1 is named with an underscore before the 4th number,
 # matching the other platforms' assets.
 ASSET_VER=$(printf '%s' "$VER" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)$/\1_\2/')
+if [ ${#TARGETS[@]} -gt 1 ]; then ARCH_TAG=universal; else ARCH_TAG=arm64; fi
 NAME="AG_${ASSET_VER}_macos"
 APP_NAME="Antigravity Unlocker.app"
 VOLUME="Antigravity Unlocker"
-APP_ZIP="AG_${ASSET_VER}_macOS_arm64_app-local.zip"
-DMG="AG_${ASSET_VER}_macOS_arm64-local.dmg"
+APP_ZIP="AG_${ASSET_VER}_macOS_${ARCH_TAG}_app-local.zip"
+# No version in the name: every release carries the same file, so
+# .../releases/latest/download/Psychotic_AG_Fork.dmg always fetches the newest.
+DMG="Psychotic_AG_Fork.dmg"
 BIN_ID="local.antigravity.unlocker"
 TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT/target}
-BIN="$TARGET_DIR/$TARGET/release/ag_unlocker"
-
-if [ "$BUILD" = 1 ]; then
-  cargo build --release --bin ag_unlocker --target "$TARGET"
-fi
-[ -x "$BIN" ] || { echo "no release binary at $BIN" >&2; exit 1; }
-
-# Smoke: the binary starts and knows its version. `--version` touches nothing.
-"$BIN" --version >/dev/null
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
+
+# ---- The binary: one cargo build per slice, then one fat Mach-O.
+SLICES=()
+for target in "${TARGETS[@]}"; do
+  if [ "$BUILD" = 1 ]; then
+    cargo build --release --bin ag_unlocker --target "$target"
+  fi
+  slice="$TARGET_DIR/$target/release/ag_unlocker"
+  [ -x "$slice" ] || { echo "no release binary at $slice" >&2; exit 1; }
+  SLICES+=("$slice")
+done
+BIN="$STAGE/ag_unlocker"
+lipo -create -output "$BIN" "${SLICES[@]}"
+if [ "$ARCH_TAG" = universal ]; then
+  lipo "$BIN" -verify_arch arm64 x86_64
+fi
+
+# Ad hoc, with the hardened runtime the window needs no entitlement against.
+# The identifier is the app's, for the bare binary too.
+sign() {
+  codesign --force --sign - --options runtime --identifier "$BIN_ID" "$1"
+}
+
+# Smoke: the binary starts and knows its version. `--version` touches nothing.
+# The Intel slice runs under Rosetta when it is installed.
+sign "$BIN"
+"$BIN" --version >/dev/null
+if [ "$ARCH_TAG" = universal ] && arch -x86_64 /usr/bin/true 2>/dev/null; then
+  arch -x86_64 "$BIN" --version >/dev/null
+fi
 
 # ---- The folder bundle: binary + launcher + README.
 mkdir -p "$STAGE/$NAME"
 cp "$BIN" "$STAGE/$NAME/ag_unlocker"
 chmod +x "$STAGE/$NAME/ag_unlocker"
-# Ad hoc, so Gatekeeper does not kill our own download before the patcher can
-# re-sign anything. Identifier kept the same as the .app's.
-codesign --force --sign - --identifier "$BIN_ID" "$STAGE/$NAME/ag_unlocker"
 cp macos/README.md "$STAGE/$NAME/README.md"
 cp "macos/Запустить.command" "$STAGE/$NAME/Запустить.command"
 chmod +x "$STAGE/$NAME/Запустить.command"
@@ -73,7 +96,7 @@ cp "$BIN" "$APP/Contents/MacOS/ag_unlocker"
 chmod +x "$APP/Contents/MacOS/ag_unlocker"
 sed "s/__VERSION__/$VER/g" macos/Info.plist > "$APP/Contents/Info.plist"
 cp macos/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
-codesign --force --sign - --options runtime --identifier "$BIN_ID" "$APP"
+sign "$APP"
 codesign --verify --strict --verbose=1 "$APP"
 "$APP/Contents/MacOS/ag_unlocker" --version >/dev/null
 

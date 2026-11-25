@@ -204,7 +204,7 @@ impl App {
                 format!(
                     " ⬆ новая версия {}: {} ",
                     rel.display_version(),
-                    update::RELEASES_LATEST_URL
+                    update::releases_latest_url()
                 ),
                 Style::new()
                     .fg(palette::BG)
