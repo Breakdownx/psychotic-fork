@@ -114,6 +114,9 @@ pub struct Facts {
     /// write (App Management). The card then says what to grant instead of
     /// offering a patch button that fails the same way. Always false elsewhere.
     pub patch_blocked: bool,
+    /// macOS only: the patch is switched off, an install is still patched, and
+    /// its `.app` refuses the write that would take the patch out.
+    pub unpatch_blocked: bool,
 }
 
 /// One 401 can be a token refreshed a moment late; a credential Google stopped
@@ -175,6 +178,7 @@ impl Facts {
                 .map(|o| (aged(o.ago), o.model.clone())),
             unauthorized: gate.unauthorized.map(|u| (aged(u.ago), u.count)),
             patch_blocked: s.patch_blocked,
+            unpatch_blocked: s.unpatch_blocked,
         }
     }
 }
@@ -431,6 +435,26 @@ pub fn headline(f: &Facts) -> Headline {
     // step that actually fixes it, above the generic "включено не всё" so the
     // button is not a loop. The button stays so a retry after granting is one
     // click away.
+    // The same refusal the other way: the patch was switched off or deactivated
+    // and macOS will not let it come out, so the switch snaps back to on.
+    if f.unpatch_blocked {
+        #[cfg(target_os = "macos")]
+        let who = crate::macos::app_management_grantee();
+        #[cfg(not(target_os = "macos"))]
+        let who = "программу, из которой запущен анлокер";
+        return Headline {
+            tone: Tone::Action,
+            title: "macOS не даёт снять патч".into(),
+            detail: format!(
+                "Antigravity стоит в защищённой папке, и macOS не даёт анлокеру вернуть его \
+                 файлы. Откройте «Системные настройки» → «Конфиденциальность и безопасность» → \
+                 «Управление приложениями» и включите там {who}, затем снова выключите \
+                 «Разблокировку входа» или повторите «Полную деактивацию»."
+            ),
+            action: None,
+        };
+    }
+
     if f.patch_blocked {
         #[cfg(target_os = "macos")]
         let who = crate::macos::app_management_grantee();
@@ -682,6 +706,23 @@ mod tests {
             h.detail
         );
         assert_eq!(h.action, Some(Action::EnableAll));
+    }
+
+    /// The other direction (field report, 2026-11-25): switched off, still
+    /// patched, the write refused. The card names the grant and says to switch
+    /// off again - never "Включить всё", which would undo what was asked.
+    #[test]
+    fn a_refused_unpatch_names_the_fix_and_offers_no_enable() {
+        let f = Facts {
+            unpatch_blocked: true,
+            patch_blocked: true,
+            ..working()
+        };
+        let h = headline(&f);
+        assert_eq!(h.tone, Tone::Action);
+        assert!(h.title.contains("снять патч"), "{}", h.title);
+        assert!(h.detail.contains("Управление приложениями"), "{}", h.detail);
+        assert_eq!(h.action, None);
     }
 
     /// G50, the report that started this: a refusal, then quiet. Quiet is not

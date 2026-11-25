@@ -60,9 +60,9 @@ pub(super) fn overview(app: &mut App, ui: &mut egui::Ui) {
         return;
     };
     installation_list(ui, &status.installs);
-    if status.patch_blocked {
+    if let Some(note) = status.app_management_note() {
         ui.add_space(8.0);
-        widgets::hint(ui, "macOS ограничила изменение установленного приложения.");
+        widgets::hint(ui, &note);
     }
 }
 

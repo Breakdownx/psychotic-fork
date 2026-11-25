@@ -3,8 +3,8 @@
 //!
 //! Nothing here patches, kills or reconfigures anything: it reads the binaries
 //! and asks the service manager. The one write is macOS's App Management probe
-//! (`macos::write_blocked_by_app_management`), made only next to a binary that
-//! still needs the patch, and removed at once.
+//! (`macos::write_blocked_by_app_management`), made only next to a binary whose
+//! state disagrees with the settings, and removed at once.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -57,15 +57,27 @@ pub fn run() -> i32 {
         }
         for (file, file_state) in &state.files {
             say!("  {:<22} {}", describe(file_state), relative(file, install));
+            // A write is only wanted where the file and the settings disagree:
+            // unpatched while the patch is on, or patched while it is off.
             #[cfg(target_os = "macos")]
-            if *file_state == FileState::Unpatched
-                && crate::macos::write_blocked_by_app_management(file)
             {
-                say!(
-                    "  {:<22} macOS не даст записать: Системные настройки → Конфиденциальность \
-                     и безопасность → Управление приложениями",
-                    ""
-                );
+                let wanted = match file_state {
+                    FileState::Unpatched => settings.client_patch || settings.auto_patch_wanted(),
+                    FileState::Patched => !settings.client_patch,
+                    _ => false,
+                };
+                if wanted && crate::macos::write_blocked_by_app_management(file) {
+                    let what = if *file_state == FileState::Patched {
+                        "снять патч"
+                    } else {
+                        "записать"
+                    };
+                    say!(
+                        "  {:<22} macOS не даст {what}: включите {} в «Управлении приложениями»",
+                        "",
+                        crate::macos::app_management_grantee()
+                    );
+                }
             }
         }
         all_patched &= state.fully_patched();

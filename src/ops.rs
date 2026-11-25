@@ -638,6 +638,11 @@ impl Status {
 const APP_MGMT_SWITCH_NOTE: &str =
     "macOS не даёт изменить Antigravity — включите «Управление приложениями»";
 
+/// The same, for the other direction: the patch was switched off and macOS
+/// refuses to take it out, so the switch stays on.
+const APP_MGMT_UNPATCH_NOTE: &str =
+    "macOS не даёт снять патч — включите «Управление приложениями»";
+
 fn read_status(ctx: &mut Ctx, deep: bool) -> Status {
     let admin = is_admin();
 
@@ -668,17 +673,28 @@ fn read_status(ctx: &mut Ctx, deep: bool) -> Status {
     // установки" is a dead end — the button that patches it fails the same way.
     // Detect it so the card and the switch can say what macOS actually wants,
     // probing only the installs that are still unpatched.
+    //
+    // The other direction too: with the patch switched off, a still-patched
+    // install whose write is refused is why the switch snaps back to on after
+    // every click (field report, 2026-11-25). Probed only then - while the
+    // patch is wanted, a patched install needs no write.
     #[cfg(target_os = "macos")]
-    let patch_blocked = installs.iter().any(|r| {
-        r.patched == Some(false)
-            && r.path.as_deref().is_some_and(|p| {
-                crate::patch_binary::binary_targets(p)
-                    .iter()
-                    .any(|t| crate::macos::write_blocked_by_app_management(t))
-            })
-    });
+    let blocked_where = |want: bool| {
+        installs.iter().any(|r| {
+            r.patched == Some(want)
+                && r.path.as_deref().is_some_and(|p| {
+                    crate::patch_binary::binary_targets(p)
+                        .iter()
+                        .any(|t| crate::macos::write_blocked_by_app_management(t))
+                })
+        })
+    };
+    #[cfg(target_os = "macos")]
+    let patch_blocked = blocked_where(false);
+    #[cfg(target_os = "macos")]
+    let unpatch_blocked = !ctx.settings.client_patch && blocked_where(true);
     #[cfg(not(target_os = "macos"))]
-    let patch_blocked = false;
+    let (patch_blocked, unpatch_blocked) = (false, false);
 
     let patched: Vec<bool> = installs.iter().filter_map(|i| i.patched).collect();
     let client_patch = if patched.is_empty() {
@@ -689,6 +705,9 @@ fn read_status(ctx: &mut Ctx, deep: bool) -> Status {
         } else {
             State::Off
         }
+    } else if unpatch_blocked {
+        // Still patched though switched off: on, with the reason it stays so.
+        State::Partial(APP_MGMT_UNPATCH_NOTE.into())
     } else if patched.iter().all(|p| *p) {
         State::On
     } else if patched.iter().any(|p| *p) {
@@ -724,6 +743,7 @@ fn read_status(ctx: &mut Ctx, deep: bool) -> Status {
         providers: Vec::new(),
         installs,
         patch_blocked,
+        unpatch_blocked,
     }
     .with_settings_switches(&ctx.settings)
 }
@@ -1848,7 +1868,21 @@ mod tests {
             rules: false,
             providers: Vec::new(),
             patch_blocked: false,
+            unpatch_blocked: false,
         }
+    }
+
+    /// The note under the patch switch says which way macOS refused, and
+    /// nothing at all when it did not.
+    #[test]
+    fn the_app_management_note_names_the_direction() {
+        let mut s = blank_status();
+        assert_eq!(s.app_management_note(), None);
+        s.patch_blocked = true;
+        let patch = s.app_management_note().unwrap();
+        assert!(patch.contains("пропатчить") && patch.contains("Управление приложениями"));
+        s.unpatch_blocked = true;
+        assert!(s.app_management_note().unwrap().contains("снять патч"));
     }
 
     /// The regression the `Unmeasured` variant exists for: a tunnel is up and

@@ -314,6 +314,21 @@ fn inspect(target: &Path, st: &mut FileState) {
             }
             st.deferred_until = Some((cur, Instant::now() + APP_MGMT_RETRY));
         }
+        // A root-owned install: not this process's to write, and nothing changes
+        // that until the file does. Said once per file shape, never retried -
+        // the window patches it behind a password when the user asks
+        // (`elevate`). Probed only here, after a write has failed.
+        RepatchOutcome::Failed(e)
+            if target.parent().is_some_and(crate::elevate::dir_needs_root) =>
+        {
+            log(&format!(
+                "установка принадлежит root, автопатч её не трогает (патч - из окна, \
+                 с паролем администратора): {} - {}",
+                show(target),
+                e
+            ));
+            st.handled = Some(cur);
+        }
         RepatchOutcome::Failed(e) => {
             // The file is settled but the write did not land. Usually that is
             // Antigravity having been launched between the update finishing and
@@ -449,10 +464,10 @@ fn discover() -> Vec<PathBuf> {
             }
         }
     }
-    // A root-owned Linux install (`/opt`) is not this process's to write: every
-    // poll would fail with a permission error and be logged as a retry. The
-    // window patches it through pkexec when the user asks (`elevate`).
-    installs.retain(|inst| !crate::elevate::needs_root(inst));
+    // A root-owned install (`/opt` on Linux) is not filtered out here any more.
+    // That took a probe write into every install's directories on every
+    // rediscovery - every ten seconds, into the signed app bundle on macOS. It
+    // is asked only once a write has actually failed (`inspect`, the root arm).
     installs
 }
 
@@ -581,6 +596,60 @@ mod tests {
         assert_eq!(fs::read(&agy).unwrap(), b"header..inexigible..tail");
         assert_eq!(st.handled, before);
 
+        fs::remove_dir_all(&inst).ok();
+    }
+
+    /// What happens on an Antigravity update: a patched binary is replaced by
+    /// an unpatched one (same length, new mtime), and the watcher patches it
+    /// again once the new file has held still.
+    #[test]
+    fn an_update_that_replaces_a_patched_binary_is_patched_again() {
+        let inst = std::env::temp_dir().join(format!("ag_watchdog_update_{}", std::process::id()));
+        fs::create_dir_all(&inst).unwrap();
+        let agy = inst.join("agy");
+        fs::write(&agy, b"head..inexigible..tail").unwrap();
+        let mut st = FileState::default();
+        inspect(&agy, &mut st);
+        inspect(&agy, &mut st);
+        assert!(st.handled.is_some(), "the patched file is recorded");
+
+        // The update: a fresh, unpatched file renamed over the old one.
+        std::thread::sleep(Duration::from_millis(20));
+        let fresh = inst.join("agy.new");
+        fs::write(&fresh, b"head..ineligible..tail").unwrap();
+        fs::rename(&fresh, &agy).unwrap();
+
+        inspect(&agy, &mut st);
+        assert_eq!(fs::read(&agy).unwrap(), b"head..ineligible..tail", "not mid-update");
+        inspect(&agy, &mut st);
+        assert_eq!(fs::read(&agy).unwrap(), b"head..inexigible..tail");
+        fs::remove_dir_all(&inst).ok();
+    }
+
+    /// A directory this user cannot write: one failed attempt, then the shape
+    /// is recorded and left alone - no retry every few seconds, and no probe
+    /// of the directory before a write has actually failed.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_owned_install_is_tried_once_and_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        if crate::utils::is_admin() {
+            return; // root can write anywhere; nothing to show
+        }
+        let inst = std::env::temp_dir().join(format!("ag_watchdog_rootowned_{}", std::process::id()));
+        fs::create_dir_all(&inst).unwrap();
+        let agy = inst.join("agy");
+        fs::write(&agy, b"head..ineligible..tail").unwrap();
+        fs::set_permissions(&inst, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let mut st = FileState::default();
+        inspect(&agy, &mut st);
+        inspect(&agy, &mut st);
+        let cur = stat(&agy);
+        assert_eq!(st.handled, cur, "recorded, so it is not retried");
+        assert_eq!(fs::read(&agy).unwrap(), b"head..ineligible..tail");
+
+        fs::set_permissions(&inst, fs::Permissions::from_mode(0o755)).unwrap();
         fs::remove_dir_all(&inst).ok();
     }
 

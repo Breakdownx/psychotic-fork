@@ -82,6 +82,20 @@ pub fn needs_root(inst: &Path) -> bool {
     }
 }
 
+/// Whether writing into `dir` needs root - the one-directory form of
+/// `needs_root`, for the watchdog to ask once a write has failed.
+pub fn dir_needs_root(dir: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = dir;
+        false
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        !crate::utils::is_admin() && !can_write(dir)
+    }
+}
+
 /// The directories the patch creates its temps in: beside each binary it
 /// would rewrite, and beside the JS it would rewrite.
 #[cfg(not(target_os = "windows"))]

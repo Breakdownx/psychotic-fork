@@ -160,9 +160,35 @@ pub struct Status {
     /// says what to do about it instead of the bare "пропатчены не все
     /// установки"; always false off macOS.
     pub patch_blocked: bool,
+    /// macOS only: the patch was switched off (or deactivated), an install is
+    /// still patched, and its `.app` bundle refuses the write - the unpatch
+    /// cannot land, so the switch keeps reading on. Always false off macOS.
+    pub unpatch_blocked: bool,
 }
 
 impl Status {
+    /// What to do about an App Management refusal, for under the patch switch
+    /// and in the overview; `None` when nothing is refused. Names what to
+    /// switch on for this very process (`macos::app_management_grantee`).
+    pub fn app_management_note(&self) -> Option<String> {
+        if !self.patch_blocked && !self.unpatch_blocked {
+            return None;
+        }
+        #[cfg(target_os = "macos")]
+        let who = crate::macos::app_management_grantee();
+        #[cfg(not(target_os = "macos"))]
+        let who = String::from("программу, из которой запущен анлокер");
+        let what = if self.unpatch_blocked {
+            "снять патч с Antigravity"
+        } else {
+            "пропатчить Antigravity"
+        };
+        Some(format!(
+            "macOS не даёт {what}: включите {who} в «Системные настройки» → \
+             «Конфиденциальность и безопасность» → «Управление приложениями» и повторите."
+        ))
+    }
+
     pub fn get(&self, cap: Cap) -> &State {
         match cap {
             Cap::ClientPatch => &self.client_patch,

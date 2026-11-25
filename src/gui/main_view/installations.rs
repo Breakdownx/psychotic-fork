@@ -38,8 +38,8 @@ pub(super) fn installs(app: &mut App, ui: &mut egui::Ui) {
     }) {
         app.worker.send(Cmd::Set(Cap::ClientPatch, on));
     }
-    if status.patch_blocked {
-        widgets::hint(ui, "macOS ограничила изменение установленного приложения.");
+    if let Some(note) = status.app_management_note() {
+        widgets::hint(ui, &note);
     }
     ui.add_space(10.0);
     widgets::card(ui, |ui| {
