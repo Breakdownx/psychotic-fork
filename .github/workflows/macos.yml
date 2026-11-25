@@ -27,7 +27,7 @@ jobs:
       # Every target is warning-free since the crate-wide allow went; keep it so.
       RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Toolchain
         run: |
@@ -48,7 +48,20 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      # Before the ten-minute build, not after it: a tag that disagrees with
+      # Cargo.toml would publish a binary that calls itself another version.
+      - name: Tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release != ''
+        env:
+          TAG: ${{ inputs.release != '' && inputs.release || github.ref_name }}
+        run: |
+          VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$TAG" != "v$VER" ]; then
+            echo "::error::Тег $TAG не совпадает с версией $VER из Cargo.toml. Поднимите version в Cargo.toml (и Cargo.lock) или поставьте тег v$VER."
+            exit 1
+          fi
 
       - name: Toolchain
         run: |
@@ -72,7 +85,7 @@ jobs:
           macos/build.sh --out dist | tee build.out
           grep -E '^(version|name|tgz|app_zip|dmg)=' build.out >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.pack.outputs.name }}
           path: |

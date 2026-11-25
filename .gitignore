@@ -6,3 +6,7 @@
 
 # Python bytecode from build_rust.py
 __pycache__/
+
+# Build output of macos/build.sh. Releases are published by CI
+# (.github/workflows/macos.yml), not committed.
+/release/
