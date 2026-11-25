@@ -676,7 +676,7 @@ mod tests {
     /// ANSI code page, and CRLFs so the whole report is not one line.
     #[test]
     fn a_saved_report_is_what_notepad_expects() {
-        let dir = std::env::temp_dir().join("ag_unlocker_report_test");
+        let dir = std::env::temp_dir().join(format!("ag_unlocker_report_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = save_text_file(&dir, REPORT_FILE, "Отчёт\nвторая строка\n").expect("written");
         assert_eq!(path.file_name().and_then(|f| f.to_str()), Some(REPORT_FILE));

@@ -100,12 +100,15 @@ pub enum VpnSeen {
     /// No tunnel on the machine.
     None,
     /// A tunnel is up, but Antigravity's own sockets do not leave through it.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     NotCarryingClient,
     /// Measured: Antigravity's sockets leave through the tunnel.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     CarryingClient,
     /// Measured: some of them do and some do not — two language servers on
     /// different sides of a split tunnel, or sockets that outlived a rule
     /// change. The half inside faces the gate from wherever the tunnel exits.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     PartlyCarryingClient,
     /// A tunnel is up and there was nothing to read: Antigravity is not running,
     /// or has not dialled out yet.
@@ -222,7 +225,6 @@ pub enum Cmd {
     },
     /// Re-read the system *including* whether each install is patched, which
     /// means reading every Language Server binary end to end.
-    #[allow(dead_code)]
     DeepRefresh,
     Set(Cap, bool),
     AddPath(PathBuf),

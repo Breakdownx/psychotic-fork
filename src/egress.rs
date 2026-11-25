@@ -34,6 +34,7 @@ use crate::utils::{powershell, powershell_within};
 /// Prefixes an earlier build pinned to the physical adapter. They are harmless
 /// but pointless, and the persistent ones outlive the tool, so cleanup drops
 /// them. Remove this once no installed build can still have written them.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const LEGACY_PINNED_PREFIXES: &[&str] = &[
     "111.88.96.50/32",
     "111.88.96.51/32",
@@ -52,6 +53,7 @@ pub struct Egress {
 /// `ifIndex|gateway|vpn`. The gateway itself is not kept - nothing routes any
 /// more - but an interface without one is not an internet-facing link, so its
 /// presence still decides whether the line describes a usable egress.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_egress(line: &str) -> Option<Egress> {
     let mut parts = line.trim().split('|');
     let if_index = parts.next()?.trim().parse::<u32>().ok()?;
@@ -226,6 +228,7 @@ pub fn vpn_verdict(egress: Option<&Egress>) -> (bool, ClientEgress) {
 /// Drops the host routes an earlier build pinned. Deleted per interface rather
 /// than by prefix alone, so a route stranded on an adapter the machine no longer
 /// uses goes too; netsh cleans up whatever the cmdlet could not.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn remove_legacy_routes_checked() -> Result<(), String> {
     let list = LEGACY_PINNED_PREFIXES.iter().map(|p| format!("'{p}'")).collect::<Vec<_>>().join(",");
     let script = format!(
@@ -322,13 +325,9 @@ mod tests {
     #[ignore = "needs a live network; run with --ignored"]
     fn resolves_past_the_tunnel() {
         let eg = detect().expect("physical egress");
-        // The first provider with a UDP address - a DoH one has none (I49).
-        let server: Ipv4Addr = crate::resolvers::PROVIDERS
-            .iter()
-            .find_map(|p| p.v4.first())
-            .expect("a provider answering on UDP")
-            .parse()
-            .unwrap();
+        // A reference resolver: the pool has no provider on UDP:53 any more, and
+        // the question is only whether the socket leaves where it was told to.
+        let server: Ipv4Addr = crate::resolvers::REFERENCE_V4[0].parse().unwrap();
         let host = "cloudcode-pa.googleapis.com";
         let isp = dns_client::resolve_a_via(host, server, eg.if_index);
         let tunnelled = dns_client::resolve_a_via(host, server, 0);

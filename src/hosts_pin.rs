@@ -1,3 +1,7 @@
+// The hosts pin backs the Windows DNS layer (`dns.rs`); elsewhere only its
+// tests use it.
+#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+
 use std::env;
 use std::fs;
 use std::net::Ipv4Addr;

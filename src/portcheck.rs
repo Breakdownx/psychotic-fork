@@ -19,7 +19,9 @@
 //!   says `WSAEACCES`: security software refusing this program a listening
 //!   socket. The fix is an exception for our exe in that software.
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
+#[cfg(windows)]
+use std::net::Ipv4Addr;
 
 /// What stopped a bind, as `gate::Blocker::cause` spells it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +239,7 @@ fn excluded_ranges() -> Vec<(u16, u16)> {
 
 /// `netsh`'s table, in whatever language Windows speaks: every line that opens
 /// with two port numbers is a range, and nothing else in its output does.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_excluded_ranges(text: &str) -> Vec<(u16, u16)> {
     text.lines()
         .filter_map(|line| {

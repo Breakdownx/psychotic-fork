@@ -91,6 +91,9 @@ fn written_dirs(inst: &Path) -> Vec<PathBuf> {
         .filter(|t| t.is_file())
         .filter_map(|t| t.parent().map(Path::to_path_buf))
         .collect();
+    #[cfg(target_os = "macos")]
+    let app = crate::macos::resources_dir(inst).join("app");
+    #[cfg(not(target_os = "macos"))]
     let app = inst.join("resources").join("app");
     for js in [
         app.join("out").join("main.js"),
@@ -106,8 +109,8 @@ fn written_dirs(inst: &Path) -> Vec<PathBuf> {
 }
 
 /// Asked by trying, not by mode bits: ACLs, read-only mounts and ownership all
-/// answer the same question the rename will ask. Only a refusal counts - any
-/// other failure is left for the patch itself to report.
+/// answer the same question the rename will ask. Only a refusal root would get
+/// past counts - any other failure is left for the patch itself to report.
 #[cfg(not(target_os = "windows"))]
 fn can_write(dir: &Path) -> bool {
     let probe = dir.join(format!(".ag_write_probe_{}", std::process::id()));
@@ -120,8 +123,23 @@ fn can_write(dir: &Path) -> bool {
             let _ = std::fs::remove_file(&probe);
             true
         }
-        Err(e) => e.kind() != std::io::ErrorKind::PermissionDenied,
+        Err(e) => !refused_by_ownership(&e),
     }
+}
+
+/// Whether a refused write is about the permission bits - the refusal root gets
+/// past. macOS answers a TCC refusal (App Management guarding a signed `.app`,
+/// the usual state of a freshly updated Antigravity) with EPERM instead of
+/// EACCES. That one is not root's to lift: it is lifted by granting App
+/// Management in System Settings, and the patch's own error says so
+/// (`macos::app_management_hint`). Asking for a password there bought nothing,
+/// and the watchdog, which skips root-owned installs, dropped the bundle
+/// without a word.
+#[cfg(not(target_os = "windows"))]
+fn refused_by_ownership(e: &std::io::Error) -> bool {
+    const EPERM: i32 = 1;
+    e.kind() == std::io::ErrorKind::PermissionDenied
+        && !(cfg!(target_os = "macos") && e.raw_os_error() == Some(EPERM))
 }
 
 /// The command a user can run by hand when no password prompt can be shown.
@@ -194,7 +212,6 @@ fn elevated_output(exe: &Path, flag: &str, inst: &Path) -> std::io::Result<std::
 /// fails instead and the caller shows `manual_command`.
 #[cfg(not(target_os = "windows"))]
 pub fn patch_as_root(inst: &Path) -> Result<Elevated, String> {
-    use std::process::Command;
     let exe = std::env::current_exe().map_err(|e| format!("не найден путь к exe: {e}"))?;
     let out = elevated_output(&exe, PATCH_ROOT_FLAG, inst).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -293,7 +310,6 @@ fn parse_report(stdout: &str) -> Result<Elevated, String> {
 /// binary stayed patched, and the row read On again after every refresh.
 #[cfg(not(target_os = "windows"))]
 pub fn unpatch_as_root(inst: &Path) -> Result<Reverted, String> {
-    use std::process::Command;
     let exe = std::env::current_exe().map_err(|e| format!("не найден путь к exe: {e}"))?;
     let out = elevated_output(&exe, UNPATCH_ROOT_FLAG, inst).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -398,6 +414,18 @@ mod tests {
 
     /// A binary in a directory this user cannot write is what sends the patch
     /// through pkexec; one in a writable directory is patched in place.
+    /// Root gets past the permission bits, not past a TCC refusal - which macOS
+    /// reports as EPERM, where elsewhere EPERM is still a plain refusal.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn only_a_permission_bits_refusal_is_roots_to_lift() {
+        let eacces = std::io::Error::from_raw_os_error(13);
+        let eperm = std::io::Error::from_raw_os_error(1);
+        assert!(refused_by_ownership(&eacces));
+        assert_eq!(refused_by_ownership(&eperm), !cfg!(target_os = "macos"));
+        assert!(!refused_by_ownership(&std::io::Error::from_raw_os_error(28)));
+    }
+
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn a_read_only_install_needs_root_and_a_writable_one_does_not() {

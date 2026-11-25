@@ -89,7 +89,7 @@ shasum -a 256 "/полный/путь/к/файлу"
 
 ### 2. Где лежат эти бинарники
 
-`binary_targets()` — [patch_binary.rs:553](../src/patch_binary.rs). Там
+`binary_targets()` — в [patch_binary.rs](../src/patch_binary.rs). Там
 перечислены `agy`/`agy.exe`, `resources/bin/language_server(.exe)`, встроенный в
 IDE `extensions/antigravity/bin/language_server*` (с глобом по платформенному
 суффиксу) и `~/.gemini/bin`. На macOS путь к `Resources` даёт
@@ -98,7 +98,7 @@ IDE `extensions/antigravity/bin/language_server*` (с глобом по плат
 
 ### 3. Архитектура Desktop (JS или нет)
 
-`is_new_desktop_architecture()` — [patch_ide.rs:243](../src/patch_ide.rs).
+`is_new_desktop_architecture()` — в [patch_ide.rs](../src/patch_ide.rs).
 С версии 2.4+ вся авторизация ушла в `language_server`, а `dist/main.js`
 Desktop больше не патчится. Определяется по маркерам `./languageServer` +
 `./ipcHandlers` и отсутствию старых `_handleAuthErrorResponse` / `getUserStatus` /
@@ -108,13 +108,13 @@ Desktop больше не патчится. Определяется по мар
 
 ### 4. Регекс патча IDE `out/main.js`
 
-`patch_ide()` — [patch_ide.rs:159](../src/patch_ide.rs). Это длинный regex по
+`patch_ide()` — в [patch_ide.rs](../src/patch_ide.rs). Это длинный regex по
 функции обработки авторизации. Самое хрупкое к обновлениям IDE: при смене их кода
 regex перестаёт матчиться → `SignatureMissing`.
 
 ### 5. Регекс патча `extension.js`
 
-`patch_extension_js()` — [patch_ide.rs:635](../src/patch_ide.rs). Косметика рядом
+`patch_extension_js()` — в [patch_ide.rs](../src/patch_ide.rs). Косметика рядом
 с основным патчем, но тоже завязана на их код.
 
 ### Если сломался IDE / extension

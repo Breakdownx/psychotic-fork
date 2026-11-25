@@ -4,3 +4,5 @@
 *.sh text eol=lf
 *.desktop text eol=lf
 linux/README.md text eol=lf
+# The macOS launcher too: a CRLF shebang does not run.
+*.command text eol=lf

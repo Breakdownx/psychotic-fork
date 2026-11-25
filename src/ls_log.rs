@@ -794,7 +794,7 @@ mod tests {
     use std::io::Write;
 
     fn temp_log(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("ag_unlocker_ls_log_tests");
+        let dir = std::env::temp_dir().join(format!("ag_unlocker_ls_log_tests_{}", std::process::id()));
         fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join(format!("{}-{}.log", name, std::process::id()));
         let _ = fs::remove_file(&path);

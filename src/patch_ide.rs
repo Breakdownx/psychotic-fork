@@ -533,7 +533,7 @@ mod tests {
     /// is then removed. Without this the full revert left main.js patched.
     #[test]
     fn a_backup_restores_the_exact_original_and_is_removed() {
-        let dir = std::env::temp_dir().join("ag_js_restore_test");
+        let dir = std::env::temp_dir().join(format!("ag_js_restore_test_{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("main.js");
         let original = "// pristine main.js\nconst x = 1;\n";
@@ -560,7 +560,7 @@ mod tests {
     /// Keep the marker so that another attempt still detects the remaining edit.
     #[test]
     fn restore_without_a_backup_reports_the_remaining_patch() {
-        let dir = std::env::temp_dir().join("ag_js_restore_nombak");
+        let dir = std::env::temp_dir().join(format!("ag_js_restore_nombak_{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("main.js");
         fs::write(&target, "body\n// UNLOCKED").unwrap();
@@ -576,7 +576,7 @@ mod tests {
     /// the temp is cleaned up.
     #[test]
     fn atomic_write_replaces_and_leaves_no_temp() {
-        let dir = std::env::temp_dir().join("ag_js_atomic");
+        let dir = std::env::temp_dir().join(format!("ag_js_atomic_{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("f.js");
         fs::write(&target, "old").unwrap();

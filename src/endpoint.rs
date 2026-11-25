@@ -187,8 +187,10 @@ pub const PROXY_ENV_VAR: &str = crate::patch_binary::PROXY_VAR_NEW;
 /// the value is one of ours (I45) - by `remove_legacy_proxy_env`.
 ///
 /// `HTTPS_PROXY` doubles as the name a *user's own* proxy lives under, which is
-/// why removal is value-scoped and why `foreign_proxy` still reads it.
+/// why removal is value-scoped.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub const LEGACY_PROXY_ENV_VAR: &str = "HTTPS_PROXY";
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub const NO_PROXY_ENV_VAR: &str = "NO_PROXY";
 /// Node keeps its own bundled trust store and does not read the Windows one, so
 /// installing the CA as a system root is not enough: Antigravity's extension
@@ -205,6 +207,7 @@ pub const NODE_CA_ENV_VAR: &str = "NODE_EXTRA_CA_CERTS";
 /// library, so the one thing this value protected - the language server's own
 /// gRPC on `127.0.0.1` - was never at risk. It existed for the Node side, which
 /// only ever saw it because the variable was user-wide.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 const NO_PROXY_VALUE: &str = "127.0.0.1,localhost,::1";
 
 /// Removes the HTTPS_PROXY/NO_PROXY values written by old builds.
@@ -252,6 +255,7 @@ pub fn remove_legacy_proxy_env(url: &str) -> Result<bool, String> {
 /// unconditional match would delete that user's variable, and delete it again
 /// after every reboot they re-set it. Our `HTTPS_PROXY` sitting beside it is the
 /// evidence that the pair was written by an older build of this tool.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn legacy_removals(https: Option<&str>, no_proxy: Option<&str>, url: &str) -> (bool, bool) {
     let drop_proxy = https.is_some_and(|v| is_ours_on_any_port(v, url));
     (drop_proxy, drop_proxy && no_proxy == Some(NO_PROXY_VALUE))
@@ -450,6 +454,7 @@ pub fn remove_proxy(url: &str, _ca_path: &str) -> Result<(), String> {
 /// No build ever wrote the standard names on a Mac, so there is nothing
 /// legacy to migrate; a user's own `HTTPS_PROXY` is not ours to touch.
 #[cfg(target_os = "macos")]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn remove_legacy_proxy_env(_url: &str) -> Result<bool, String> {
     Ok(false)
 }
@@ -488,6 +493,7 @@ fn current_env(name: &str) -> Option<String> {
 /// and "may we take it off" - a value naming the old port is still ours to
 /// remove, never a foreign proxy to stand aside for. "Is it ours *and still
 /// current*" is `is_our_proxy_value`.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn is_ours_on_any_port(value: &str, url: &str) -> bool {
     is_our_proxy_value(value, url) || is_our_proxy_value(value, &crate::legacy_proxy::default_url())
 }
@@ -603,7 +609,6 @@ fn current_cli_endpoint() -> Option<String> {
 
 /// The value of our proxy variable as the user environment has it right now.
 /// Read-only; `None` when it is not set.
-#[allow(dead_code)]
 pub fn proxy_env_value() -> Option<String> {
     current_env(PROXY_ENV_VAR)
 }

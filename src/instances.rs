@@ -78,7 +78,7 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 mod platform {
     use super::{is_service_args, is_window_name};
 
@@ -128,9 +128,76 @@ mod platform {
     }
 }
 
+/// macOS has no `/proc`, so `ps` answers the same two questions: the image
+/// (`comm` is the whole executable path there, spaces and all) and the command
+/// line, for the service flags. Two calls, because two free-width columns in one
+/// cannot be told apart.
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::{is_service_args, is_window_name, ps_rows};
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    fn ps(column: &str) -> String {
+        Command::new("/bin/ps")
+            .args(["-axww", "-o", &format!("pid=,{column}=")])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    }
+
+    pub fn close_others(own: &str) {
+        let me = std::process::id();
+        let args: HashMap<u32, String> = ps_rows(&ps("args")).collect();
+        for (pid, image) in ps_rows(&ps("comm")) {
+            let name = std::path::Path::new(&image)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if pid == me || !is_window_name(&name, own) {
+                continue;
+            }
+            let argv: Vec<String> = args
+                .get(&pid)
+                .map(|a| a.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default();
+            if is_service_args(&argv) {
+                continue;
+            }
+            let _ = Command::new("/bin/kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .output();
+        }
+    }
+}
+
+/// `ps -o pid=,<column>=` rows as (pid, the rest of the line).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn ps_rows(text: &str) -> impl Iterator<Item = (u32, String)> + '_ {
+    text.lines().filter_map(|line| {
+        let (pid, rest) = line.trim_start().split_once(' ')?;
+        Some((pid.parse().ok()?, rest.trim().to_string()))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ps_rows_keep_a_path_with_spaces_whole() {
+        let out = "  858 /Applications/Antigravity Unlocker.app/Contents/MacOS/ag_unlocker\n\
+                   10561 /Users/x/.local/share/agunlocker/ag_proxy --watchdog\n\
+                   junk\n";
+        let rows: Vec<_> = ps_rows(out).collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            (858, "/Applications/Antigravity Unlocker.app/Contents/MacOS/ag_unlocker".to_string())
+        );
+        assert_eq!(rows[1].0, 10561);
+    }
 
     #[test]
     fn other_releases_of_the_window_are_windows_and_the_services_are_not() {

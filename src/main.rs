@@ -2,15 +2,9 @@
 // on screen behind it. The CLI flags that still print (--about/--version) and
 // the background modes attach to the parent console instead - see attach_console.
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
-// The Windows build is the shipping platform and is fully linted. The Linux port
-// is partial (phase 1: the client patch; the NRPT/relay/systemd layer is stubbed,
-// P7 phase 5), so a large Windows-only surface is legitimately dead code there.
-// Silence exactly that noise on non-Windows targets, and only there, so a real
-// dead symbol on Windows is still caught.
-#![cfg_attr(
-    not(target_os = "windows"),
-    allow(dead_code, unused_imports, unused_variables, unused_mut)
-)]
+// Every target is linted. Code only one platform calls carries its own
+// `cfg_attr(..., allow(dead_code))` (or the module does, for the Windows-only
+// DNS layer), so a symbol that is dead everywhere still shows up.
 
 use std::env;
 
@@ -50,6 +44,7 @@ mod portcheck;
 mod resolvers;
 mod settings;
 mod stale_env;
+mod status;
 mod tui;
 mod update;
 mod utils;
@@ -72,7 +67,7 @@ fn main() {
     if env::args().skip(1).any(|a| {
         matches!(
             a.trim_start_matches('-').to_ascii_lowercase().as_str(),
-            "about" | "license" | "licence" | "version" | "v" | "cli"
+            "about" | "license" | "licence" | "version" | "v" | "cli" | "status"
         )
     }) {
         utils::attach_parent_console();
@@ -107,6 +102,12 @@ fn main() {
     }
 
     canary::handle_cli_flags();
+
+    // Read-only and one-shot, so before `close_others`: asking for a status
+    // must not close the window the user is looking at.
+    if status::requested() {
+        std::process::exit(status::run());
+    }
 
     // A window of an older release left open would keep re-applying its own
     // state under this one.

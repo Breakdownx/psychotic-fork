@@ -23,6 +23,7 @@ pub struct Holder {
 
 /// Whether a Windows environment block (`NAME=VALUE\0…\0\0`, UTF-16) has an
 /// entry called `name`. Names compare case-insensitively, as Windows does.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn block_has_var(block: &[u16], name: &str) -> bool {
     let want: Vec<u16> = name.encode_utf16().chain([u16::from(b'=')]).collect();
     block
@@ -37,6 +38,7 @@ pub fn block_has_var(block: &[u16], name: &str) -> bool {
         })
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn fold(c: u16) -> u16 {
     if (u16::from(b'a')..=u16::from(b'z')).contains(&c) {
         c - 32

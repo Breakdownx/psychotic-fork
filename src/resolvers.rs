@@ -27,27 +27,14 @@ use rustls::ClientConnection;
 // When a provider re-adds a name, or a new provider is added below, it starts
 // being used with no code change and no release.
 
-/// How a provider is reached.
-///
-/// The distinction is not cosmetic: `v4`/`v6` are also what an NRPT rule lists
-/// as fallback nameservers (I5, I22), and Windows can only be pointed at a
-/// plain resolver. A DoH endpoint answers no UDP query at all, so putting one
-/// in a rule would hand a name a nameserver that never replies. That is
-/// enforced structurally - a `Doh` provider carries **empty** `v4`/`v6`, so
-/// `fallback_v4`, `all_v6` and `substituting_addrs` all skip it without needing
-/// to know about transports - and asserted by `a_doh_provider_is_never_offered_
-/// as_a_nameserver`.
+/// How a provider is reached. Only the relay asks either kind: neither is a
+/// plain resolver on UDP:53, so neither can be an NRPT nameserver (`dns.rs`
+/// lists the relay alone).
 pub enum Transport {
-    /// Plain DNS on UDP:53, queried over a socket pinned to the ISP interface.
-    /// No provider in `PROVIDERS` uses it at the moment; the variant stays so a
-    /// plain resolver can be listed again without touching the query paths.
-    #[allow(dead_code)]
-    Udp,
     /// DNS-over-HTTPS. Reachable only through the relay, never by Windows.
     Doh(&'static crate::doh::Endpoint),
     /// The user's own DNS server(s), read from `settings.custom_dns` at query
-    /// time (`custom_dns_servers`). Like a DoH provider it carries empty `v4`/`v6`:
-    /// the addresses are not ours to put into an NRPT rule, only the relay asks.
+    /// time (`custom_dns_servers`). Not ours to put into an NRPT rule.
     Custom,
 }
 
@@ -317,19 +304,14 @@ fn custom_is_empty() -> bool {
     custom_dns_servers().is_empty()
 }
 
-/// One unblock service. Addresses are tried in order; the first that answers
-/// speaks for the provider, so a dead front-end does not cost it the race.
+/// One unblock service: a service that substitutes Google/AI endpoints for
+/// clients it geolocates to a blocked region. What each substitutes changes
+/// without notice, which is exactly why the choice is made per query.
 pub struct Provider {
     pub name: &'static str,
-    pub v4: &'static [&'static str],
-    pub v6: &'static [&'static str],
     pub transport: Transport,
 }
 
-/// Services that substitute Google/AI endpoints for clients they geolocate to a
-/// blocked region. All three were verified to answer over plain UDP:53 and to
-/// front a real SNI proxy (see kb/dns.md); their lists differ and change
-/// without notice, which is exactly why the choice is made per query.
 /// The provider names, in pool order, for the window's per-provider switches.
 ///
 /// Names only. The addresses stay where they are: a switch list is a new place
@@ -357,13 +339,10 @@ pub const PROVIDERS: &[Provider] = &[
     // `generativelanguage` from the same address, and correctly passes
     // `jetski-webchannel` through, so it is not a blanket rewriter.
     //
-    // `v4`/`v6` are empty because it speaks **only** DoH over HTTP/2 - HTTP/1.1
-    // gets a 505 and its two addresses answer nothing on UDP:53. See `Transport`
-    // for why that emptiness is load-bearing rather than an omission.
+    // It speaks **only** DoH over HTTP/2: HTTP/1.1 gets a 505 and its two
+    // addresses answer nothing on UDP:53.
     Provider {
         name: "dns-ai.ru",
-        v4: &[],
-        v6: &[],
         transport: Transport::Doh(&DNS_AI),
     },
     // Last on purpose: the user's own server(s). Not a provider at all until
@@ -371,8 +350,6 @@ pub const PROVIDERS: &[Provider] = &[
     // rotation and the head-of-list choice while the field is empty.
     Provider {
         name: CUSTOM_NAME,
-        v4: &[],
-        v6: &[],
         transport: Transport::Custom,
     },
     // xbox-dns.ru is not here any more (owner, 2.14.0_1). Measured over the ISP
@@ -637,45 +614,6 @@ static ROTATION: AtomicUsize = AtomicUsize::new(0);
 /// moment it was decided. The verdict is remembered too, so a cache hit can
 /// still tell a caller whether the answer it is about to use was substituted.
 static CHOICE: Mutex<Option<HashMap<(String, u16), (usize, Verdict, Instant)>>> = Mutex::new(None);
-
-/// Every provider's IPv6 addresses, in provider order. The NRPT rule takes
-/// these only when the relay is off - with the relay up a v6 nameserver would
-/// let Windows send the query straight out, skipping the relay entirely.
-pub fn all_v6() -> Vec<&'static str> {
-    let mut list: Vec<&'static str> = in_user_order()
-        .into_iter()
-        .filter(|p| !denied(p.name))
-        .flat_map(|p| p.v6.iter().copied())
-        .collect();
-    if !crate::settings::rotation_enabled() {
-        // Rotation off narrows the nameserver list too, or Windows would still
-        // be pointed at providers the user took out of the pool.
-        list.truncate(1);
-    }
-    list
-}
-
-/// One address per provider - what goes into an NRPT rule. Windows tries the
-/// nameservers in order, so listing every address of one provider ahead of the
-/// next provider would make a provider outage look like a total failure.
-pub fn fallback_v4() -> Vec<&'static str> {
-    // Filtered by the deny-list only, *then* truncated: the head of `PROVIDERS`
-    // speaks DoH and carries no UDP address at all (I49), so narrowing by name
-    // first would leave Windows a rule with no nameserver in it. Truncating the
-    // assembled addresses picks the first enabled provider that actually has
-    // one, which is what a nameserver list needs.
-    // Windows tries nameservers in the order given, so the user's order is what
-    // decides which service sees a lookup first.
-    let mut list: Vec<&'static str> = in_user_order()
-        .into_iter()
-        .filter(|p| !denied(p.name))
-        .filter_map(|p| p.v4.first().copied())
-        .collect();
-    if !crate::settings::rotation_enabled() {
-        list.truncate(1);
-    }
-    list
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -1302,20 +1240,6 @@ fn in_user_order() -> Vec<&'static Provider> {
     out
 }
 
-/// The providers that can be handed to Windows as a nameserver.
-///
-/// A DoH provider carries no UDP address by construction (I49), so it can answer
-/// through the relay and still be useless in an NRPT rule. Leaving *only* those
-/// enabled empties the rule's fallback list, and a rule with no nameserver is
-/// worse than no rule at all — hence the guard in `ops`.
-pub fn udp_provider_names() -> Vec<&'static str> {
-    in_user_order()
-        .into_iter()
-        .filter(|p| !p.v4.is_empty())
-        .map(|p| p.name)
-        .collect()
-}
-
 /// The provider names in the user's order — what the window's list draws.
 pub fn ordered_provider_names() -> Vec<&'static str> {
     in_user_order().into_iter().map(|p| p.name).collect()
@@ -1356,17 +1280,6 @@ fn ask_provider(
         return None;
     }
     match provider.transport {
-        Transport::Udp => {
-            for server in provider.v4 {
-                let Ok(ip) = server.parse::<Ipv4Addr>() else {
-                    continue;
-                };
-                if let Ok(reply) = dns_client::query_raw_via(query, ip, if_index, timeout) {
-                    return Some(reply);
-                }
-            }
-            None
-        }
         Transport::Custom => {
             for server in custom_dns_servers() {
                 if let Some(reply) = ask_custom(&server, query, if_index, timeout) {
@@ -1497,7 +1410,6 @@ fn preferred_provider(name: &str) -> Option<usize> {
 fn one_shot_floor(provider: &Provider, budget: Duration) -> Duration {
     match provider.transport {
         Transport::Doh(_) => budget.max(DOH_FAST_TIMEOUT),
-        Transport::Udp => budget,
         // A DoH/DoT server needs a handshake before it can answer at all.
         Transport::Custom => {
             if custom_dns_servers()
@@ -1806,15 +1718,12 @@ fn prefer_substituted(
 
 /// Seeds each provider's proxy-address set from a control name, sequentially.
 ///
-/// `substituting_addrs` runs in the menu process at rule-setup time, which has
-/// its own (cold) `PROXY_SET` - the relay's warm loop that normally learns it
-/// lives in a different process. Without this the set is empty, and `classify`
-/// falls back to its bootstrap rule (`proxy.is_empty()` -> `Substituted`), which
-/// flags a genuine answer that merely landed on a different Google /16 (D7).
-/// That is exactly how xbox-dns, which returns genuine for `daily-cloudcode-pa`,
-/// ended up written into that name's NRPT fallback - the I22 leak. Learning the
-/// sets first makes `classify` take the proxy-match path, so a genuine
-/// different-/16 answer is `Sibling`, not `Substituted`.
+/// For the live pool measurement, which runs in a process of its own with a cold
+/// `PROXY_SET` - the relay's warm loop that normally learns it lives elsewhere.
+/// Without this the set is empty, and `classify` falls back to its bootstrap
+/// rule (`proxy.is_empty()` -> `Substituted`), which flags a genuine answer that
+/// merely landed on a different Google /16 (D7).
+#[cfg(test)]
 fn ensure_proxy_sets_learned(if_index: u32) {
     if !(0..PROVIDERS.len()).any(proxy_addrs_are_stale) {
         return;
@@ -1862,46 +1771,13 @@ fn ensure_proxy_sets_learned(if_index: u32) {
     }
 }
 
-pub fn substituting_addrs(name: &str, if_index: u32) -> Vec<&'static str> {
-    ensure_proxy_sets_learned(if_index);
-    let query = dns_client::build_query(name, 0x6767);
-
-    let mut reference: Vec<IpAddr> = Vec::new();
-    for server in REFERENCE_V4 {
-        if let Ok(ip) = server.parse::<Ipv4Addr>() {
-            if let Ok(reply) = dns_client::query_raw_via(&query, ip, if_index, QUERY_TIMEOUT) {
-                reference.extend(dns_client::answer_addrs(&reply));
-            }
-        }
-    }
-
-    let mut out = Vec::new();
-    for (idx, provider) in PROVIDERS.iter().enumerate() {
-        let Some(reply) = ask_provider(provider, &query, if_index, QUERY_TIMEOUT) else {
-            continue;
-        };
-        let addrs = dns_client::answer_addrs(&reply);
-        let known = known_proxy_addrs(idx);
-        // Only a substitution backed by a *known* proxy address is written into
-        // an NRPT fallback. classify's empty-set bootstrap exists to learn
-        // control names, not to build rules: trusting it here would flag genuine
-        // Google on a different /16 and re-open the I22 leak (see
-        // `ensure_proxy_sets_learned`).
-        if !known.is_empty() && classify(&addrs, &reference, &known) == Verdict::Substituted {
-            if let Some(first) = provider.v4.first() {
-                out.push(*first);
-            }
-        }
-    }
-    out
-}
-
 /// Resolves `name` the same way, for callers that want addresses rather than a
 /// packet - `hosts_pin` writes literals, not DNS messages.
 ///
 /// The verdict comes back with them so the caller can refuse to pin an answer
 /// that was never substituted: freezing a genuine Google address into `hosts`
 /// buys nothing and goes stale the moment Google rotates its edge.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn resolve_a_best(name: &str, if_index: u32) -> Option<(Vec<Ipv4Addr>, &'static str, Verdict)> {
     // The id only has to be echoed back; `query_raw_via` matches on it.
     let query = dns_client::build_query(name, 0x5A5A);
@@ -1986,13 +1862,6 @@ mod tests {
         IpAddr::V4(s.parse().unwrap())
     }
 
-    fn udp_providers() -> Vec<&'static Provider> {
-        PROVIDERS
-            .iter()
-            .filter(|p| matches!(p.transport, Transport::Udp))
-            .collect()
-    }
-
     #[test]
     fn custom_dns_takes_ipv4_doh_and_dot_and_refuses_junk() {
         let got = parse_custom_dns(
@@ -2075,80 +1944,22 @@ mod tests {
         );
     }
 
-    /// The slot carries no address of its own (like a DoH provider): it must never
-    /// leak into an NRPT nameserver list, and it must be in the pool.
+    /// The user's slot is in the pool, under the name every switch is keyed by.
     #[test]
-    fn the_custom_slot_is_in_the_pool_and_offers_no_nameserver() {
+    fn the_custom_slot_is_in_the_pool() {
         let p = PROVIDERS
             .iter()
             .find(|p| matches!(p.transport, Transport::Custom))
             .expect("a custom slot");
-        assert!(p.v4.is_empty() && p.v6.is_empty());
-        assert!(!fallback_v4().iter().any(|a| a.is_empty()));
+        assert_eq!(p.name, CUSTOM_NAME);
     }
 
     #[test]
-    fn dns_ai_is_the_only_builtin_and_no_doh_address_leaks_to_nrpt() {
+    fn dns_ai_is_the_only_builtin() {
         let builtin: Vec<_> = PROVIDERS.iter().filter(|p| !matches!(p.transport, Transport::Custom)).collect();
         assert_eq!(builtin.len(), 1);
         assert_eq!(builtin[0].name, "dns-ai.ru");
         assert!(matches!(builtin[0].transport, Transport::Doh(_)));
-        assert!(fallback_v4().is_empty());
-        assert!(all_v6().is_empty());
-    }
-
-    #[test]
-    fn every_udp_provider_has_at_least_one_address() {
-        assert!(!PROVIDERS.is_empty());
-        for p in udp_providers() {
-            assert!(!p.v4.is_empty(), "{} has no IPv4 address", p.name);
-            for a in p.v4 {
-                assert!(a.parse::<Ipv4Addr>().is_ok(), "{} is not an address", a);
-            }
-        }
-    }
-
-    /// The NRPT rule takes one address per provider, so a provider outage falls
-    /// through to a different service rather than to its own dead sibling.
-    #[test]
-    fn the_fallback_list_is_one_address_per_udp_provider() {
-        let fallback = fallback_v4();
-        let udp = udp_providers();
-        assert_eq!(fallback.len(), udp.len());
-        for (i, p) in udp.iter().enumerate() {
-            assert_eq!(fallback[i], p.v4[0]);
-        }
-    }
-
-    /// The invariant a DoH provider lives or dies by.
-    ///
-    /// `fallback_v4`/`all_v6` feed NRPT nameserver lists, and Windows can only be
-    /// pointed at something that answers UDP:53. A DoH endpoint answers nothing
-    /// there - measured: both of dns-ai.ru's addresses time out on 53 - so if one
-    /// ever reached a rule, that name would get a nameserver that never replies
-    /// and the whole rule would hang on it. Enforced structurally by empty
-    /// `v4`/`v6`, which is easy to undo by accident while "filling in" a provider
-    /// entry, so it is asserted rather than commented.
-    #[test]
-    fn a_doh_provider_is_never_offered_as_a_nameserver() {
-        let listed: Vec<&str> = fallback_v4().into_iter().chain(all_v6()).collect();
-        for p in PROVIDERS {
-            let Transport::Doh(endpoint) = p.transport else {
-                continue;
-            };
-            assert!(
-                p.v4.is_empty() && p.v6.is_empty(),
-                "{} speaks DoH, so its address list must stay empty",
-                p.name
-            );
-            for a in endpoint.addrs {
-                assert!(
-                    !listed.contains(a),
-                    "{} would be handed to Windows as a nameserver",
-                    a
-                );
-            }
-        }
     }
 
     /// The flag defaults to "no tunnel", which is the behaviour every existing
@@ -2201,14 +2012,7 @@ mod tests {
             .iter()
             .find(|p| matches!(p.transport, Transport::Doh(_)))
             .expect("a DoH provider");
-        let udp = Provider {
-            name: "fixture",
-            v4: &["192.0.2.53"],
-            v6: &[],
-            transport: Transport::Udp,
-        };
         assert_eq!(one_shot_floor(doh, FAST_PATH_TIMEOUT), DOH_FAST_TIMEOUT);
-        assert_eq!(one_shot_floor(&udp, FAST_PATH_TIMEOUT), FAST_PATH_TIMEOUT);
         // A caller that already budgeted more keeps it.
         assert_eq!(one_shot_floor(doh, QUERY_TIMEOUT), QUERY_TIMEOUT);
         // And the whole thing still fits inside the second Windows waits (I23).
@@ -2237,7 +2041,11 @@ mod tests {
     fn reference_resolvers_are_not_providers() {
         let providers: Vec<&str> = PROVIDERS
             .iter()
-            .flat_map(|p| p.v4.iter().copied())
+            .filter_map(|p| match p.transport {
+                Transport::Doh(endpoint) => Some(endpoint.addrs.iter().copied()),
+                Transport::Custom => None,
+            })
+            .flatten()
             .collect();
         for r in REFERENCE_V4 {
             assert!(!providers.contains(r), "{} is on both lists", r);
@@ -2410,33 +2218,6 @@ mod tests {
         assert_eq!(known_proxy_addrs(idx), vec![v4("87.228.47.204")]);
     }
 
-    /// Live: what the NRPT fallback list will be built from for each routed
-    /// name. `daily-cloudcode-pa` must come back with geohide only - the bug
-    /// was xbox-dns/comss (which return genuine Google for it) sitting in that
-    /// list and leaking. Run VPN-off.
-    #[test]
-    #[ignore = "needs a live network, VPN off; run with --ignored"]
-    fn substituting_addrs_excludes_passthrough_providers() {
-        for name in [
-            "cloudcode-pa.googleapis.com",
-            "daily-cloudcode-pa.googleapis.com",
-            "generativelanguage.googleapis.com",
-            "antigravity-unleash.goog",
-        ] {
-            let subs = substituting_addrs(name, 0);
-            println!("{:<38} substituted by {:?}", name, subs);
-            // Whatever is returned must be a real provider address, never a
-            // reference resolver - a reference in the fallback would be a leak.
-            for s in &subs {
-                assert!(
-                    !REFERENCE_V4.contains(s),
-                    "{} is a reference resolver, not a substituter",
-                    s
-                );
-            }
-        }
-    }
-
     /// Live: the whole pool, provider by provider and name by name — what each
     /// answered, what proxy set was learned for it, and the verdict that follows.
     ///
@@ -2444,8 +2225,7 @@ mod tests {
     /// asserts nothing about *who* substitutes what, because that is exactly the
     /// thing that changes without warning and must not be pinned in a test (N15:
     /// a measurement recorded as a property of a host outlived the measurement by
-    /// months). It only pins the two rules that are ours: an NRPT fallback never
-    /// names a reference resolver, and never names a DoH provider (I49).
+    /// months).
     ///
     ///     cargo test the_pool_measured_provider_by_provider -- --ignored --nocapture
     #[test]
@@ -2489,34 +2269,17 @@ mod tests {
                         } else {
                             0
                         };
-                        // Both verdicts: the bootstrap one the relay may act on,
-                        // and the stricter one an NRPT fallback needs.
                         println!(
-                            "  {:<12} rcode={} an={} len={} {:?} -> race {:?}, rule {}",
+                            "  {:<12} rcode={} an={} len={} {:?} -> {:?}",
                             p.name,
                             rcode,
                             ancount,
                             reply.len(),
                             addrs,
                             classify(&addrs, &reference, &known),
-                            if known.is_empty() {
-                                "исключён (прокси-набор не выучен)".to_string()
-                            } else {
-                                format!("{:?}", classify(&addrs, &reference, &known))
-                            }
                         );
                     }
                 }
-            }
-            for s in substituting_addrs(name, 0) {
-                assert!(!REFERENCE_V4.contains(&s), "{} is a reference resolver", s);
-                assert!(
-                    PROVIDERS
-                        .iter()
-                        .any(|p| p.v4.contains(&s) && !matches!(p.transport, Transport::Doh(_))),
-                    "{} is not a UDP provider address (I49)",
-                    s
-                );
             }
         }
     }

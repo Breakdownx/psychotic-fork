@@ -156,6 +156,7 @@ pub fn record_version() {
 
 /// The relay generation currently installed. `0` for a relay old enough not to
 /// have written one - which is exactly the case worth reporting.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn installed_version() -> u32 {
     parse_version(fs::read_to_string(version_path()).ok().as_deref())
 }
@@ -163,6 +164,7 @@ pub fn installed_version() -> u32 {
 /// Anything unreadable counts as the oldest possible relay: the file is written
 /// by us and never edited, so a value that will not parse means something else
 /// wrote it, and "reinstall" is the right answer to that too.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_version(raw: Option<&str>) -> u32 {
     raw.and_then(|s| s.trim().parse().ok()).unwrap_or(0)
 }
@@ -272,6 +274,7 @@ pub fn log_fatal(message: &str) {
 /// Socket-level notes from `net` (interface pinning), in the relay's own log so
 /// they read together with the resolves they affected.
 #[cfg(not(target_os = "windows"))]
+#[cfg_attr(test, allow(dead_code))] // its one caller is `cfg(not(test))`
 pub fn log_net(message: &str) {
     log(&format!("net          {}", message));
 }
@@ -386,7 +389,6 @@ fn warm_forever() {
         }
         gate::publish(gate::Now {
             route: Some("DNS"),
-            forced_for: None,
             stood_down: resolvers::vpn_is_active(),
             loopback: false,
             tunnel: net::tunnel_up(),

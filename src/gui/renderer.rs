@@ -99,6 +99,8 @@ impl Kind {
 
     /// The wgpu half of the options. Ignored by glow.
     pub fn wgpu_options(self) -> egui_wgpu::WgpuConfiguration {
+        // Only the Windows block below changes it.
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut config = egui_wgpu::WgpuConfiguration::default();
         #[cfg(windows)]
         {

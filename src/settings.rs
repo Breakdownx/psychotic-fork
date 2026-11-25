@@ -108,7 +108,6 @@ pub struct Settings {
     /// No longer a switch: the certificate of a substituted address is always
     /// verified, and an address that passed is trusted for a day (`resolvers.rs`,
     /// `TLS_VERIFIED_FOR`). Stays in the file so an older build still finds it.
-    #[allow(dead_code)]
     pub verify_tls: bool,
 
     /// Installs the user pointed at by hand, on top of the ones found by the
@@ -515,7 +514,7 @@ mod tests {
     /// A save is a whole file or nothing, and leaves no temp behind.
     #[test]
     fn a_save_replaces_the_file_whole() {
-        let dir = std::env::temp_dir().join("ag_settings_replace");
+        let dir = std::env::temp_dir().join(format!("ag_settings_replace_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("settings.json");
         std::fs::write(&file, "old").unwrap();

@@ -137,19 +137,40 @@ pub fn kill_holder(bin_path: &Path) {
 
 #[cfg(not(target_os = "windows"))]
 pub fn kill_holder(bin_path: &Path) {
-    let name = bin_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    if !name.is_empty() {
-        Command::new("pkill")
-            .args(["-f", &name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .ok();
+    kill_exact(bin_path);
+}
+
+/// Stops the processes running `bin` itself, and nothing else.
+///
+/// `pkill -f` matches the whole command line as a regex, so a bare basename
+/// (`language_server`) also hit another product's server of the same name -
+/// Windsurf ships `language_server_macos_arm` - and any process whose arguments
+/// merely mention the path. Electron starts the server by its full path (seen:
+/// `/Applications/Antigravity.app/Contents/Resources/bin/language_server
+/// --standalone ...`), so the pattern is that path, anchored at the start and
+/// ending at an argument boundary.
+#[cfg(not(target_os = "windows"))]
+fn kill_exact(bin: &Path) {
+    Command::new("pkill")
+        .args(["-f", &exact_command_pattern(bin)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok();
+}
+
+/// `^<path>( |$)` with the path's ERE metacharacters escaped.
+#[cfg(not(target_os = "windows"))]
+fn exact_command_pattern(bin: &Path) -> String {
+    let mut out = String::from("^");
+    for c in bin.to_string_lossy().chars() {
+        if "\\.^$*+?()[]{}|".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
     }
+    out.push_str("( |$)");
+    out
 }
 
 /// The Antigravity app that owns a language server: the first directory above
@@ -493,6 +514,7 @@ pub enum RepatchOutcome {
     /// A transient failure, usually a file locked mid-update. Retry later.
     Failed(String),
     /// An additive edit is locked; retry without ever killing a working LS.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     Deferred(String),
 }
 
@@ -668,23 +690,23 @@ fn kill_platform_processes() {
     }
 }
 
-/// The Linux/macOS side. The language server is the process holding the file
-/// open; it is matched by the binary's basename via `pkill -f` so whatever the
-/// platform suffix is (`language_server_linux_x64`), it is caught. The `agy` CLI
-/// and the two language-server basenames are killed; the editor shell is left
-/// running, same rule as Windows.
+/// The Linux/macOS side: every binary the patcher targets in every install it
+/// knows of (the standard locations and the user's own paths), each stopped by
+/// its exact path (`kill_exact`). Whatever platform suffix the server carries,
+/// `binary_targets` has already found it. The editor shell is left running,
+/// same rule as Windows.
 #[cfg(not(target_os = "windows"))]
 fn kill_platform_processes() {
-    // -f matches against the whole command line, so a full install path still
-    // matches; the patterns are the binary basenames the patcher targets.
-    let patterns = ["language_server", "/agy"];
-    for pat in patterns.iter() {
-        Command::new("pkill")
-            .args(["-f", pat])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .ok();
+    let mut installs = crate::settings::manual_paths();
+    for path in crate::installs::discover_installs_fast() {
+        if !installs.contains(&path) {
+            installs.push(path);
+        }
+    }
+    for install in installs {
+        for bin in binary_targets(&install) {
+            kill_exact(&bin);
+        }
     }
 }
 
@@ -744,7 +766,6 @@ pub enum FileState {
     Unreadable(String),
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallState {
     pub files: Vec<(std::path::PathBuf, FileState)>,
@@ -813,7 +834,6 @@ fn contains_subslice(data: &[u8], needle: &[u8]) -> bool {
 
 /// Inspects one binary file on disk in a streaming manner using a 1 MiB buffer
 /// with overlap to prevent missing matches at buffer boundaries.
-#[allow(dead_code)]
 pub fn inspect_file(bin_path: &Path) -> FileState {
     inspect_file_stream(bin_path, INSPECT_CHUNK_SIZE)
 }
@@ -875,7 +895,6 @@ fn inspect_file_stream(bin_path: &Path, chunk_size: usize) -> FileState {
 /// Reads every native binary of one install and reports whether each carries the
 /// patched name. Read-only: opens files for reading, writes nothing, spawns no
 /// child process, kills no process.
-#[allow(dead_code)]
 pub fn inspect_install(install: &std::path::Path) -> InstallState {
     let targets = binary_targets(install);
     let mut files = Vec::with_capacity(targets.len());
@@ -889,6 +908,32 @@ pub fn inspect_install(install: &std::path::Path) -> InstallState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn the_kill_pattern_is_the_whole_path_and_nothing_around_it() {
+        let p = exact_command_pattern(Path::new(
+            "/Applications/Antigravity IDE.app/Contents/Resources/bin/language_server",
+        ));
+        assert_eq!(
+            p,
+            "^/Applications/Antigravity IDE\\.app/Contents/Resources/bin/language_server( |$)"
+        );
+        let re = regex::Regex::new(&p).unwrap();
+        assert!(re.is_match(
+            "/Applications/Antigravity IDE.app/Contents/Resources/bin/language_server --standalone"
+        ));
+        // Another product's server, and a process that only mentions the path.
+        assert!(!re.is_match(
+            "/Applications/Windsurf.app/Contents/Resources/app/extensions/windsurf/bin/language_server_macos_arm"
+        ));
+        assert!(!re.is_match(
+            "/bin/cat /Applications/Antigravity IDE.app/Contents/Resources/bin/language_server"
+        ));
+        assert!(!re.is_match(
+            "/Applications/Antigravity IDE.app/Contents/Resources/bin/language_server_old --x"
+        ));
+    }
 
     #[cfg(windows)]
     #[test]
@@ -997,7 +1042,7 @@ mod tests {
     /// is the classification, not the literals.
     #[test]
     fn repatch_classifies_each_case() {
-        let dir = std::env::temp_dir().join("ag_repatch_test");
+        let dir = std::env::temp_dir().join(format!("ag_repatch_test_{}", std::process::id()));
         fs::create_dir_all(&dir).expect("temp dir");
 
         // Reverted by an update: contains the original field name → re-patched.
@@ -1055,7 +1100,7 @@ mod tests {
             return;
         }
 
-        let tmp = std::env::temp_dir().join("ag_unlocker_ls_patch_test.exe");
+        let tmp = std::env::temp_dir().join(format!("ag_unlocker_ls_patch_test_{}.exe", std::process::id()));
         fs::copy(&src, &tmp).expect("copy language server");
         unpatch_proxy_var(&tmp).ok();
         unpatch_binary(&tmp).ok();
@@ -1107,7 +1152,7 @@ mod tests {
     /// file, stay.
     #[test]
     fn a_stale_temp_is_swept_and_a_fresh_one_is_not() {
-        let dir = std::env::temp_dir().join("ag_sweep_temps");
+        let dir = std::env::temp_dir().join(format!("ag_sweep_temps_{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("language_server.exe");
         fs::write(&target, b"x").unwrap();
@@ -1146,7 +1191,7 @@ mod tests {
 
     #[test]
     fn inspect_matches_across_buffer_boundary() {
-        let dir = std::env::temp_dir().join("ag_inspect_boundary_test");
+        let dir = std::env::temp_dir().join(format!("ag_inspect_boundary_test_{}", std::process::id()));
         fs::create_dir_all(&dir).expect("temp dir");
 
         let chunk_size = 1024 * 1024;
@@ -1170,7 +1215,7 @@ mod tests {
 
     #[test]
     fn inspect_missing_signature_when_neither_present() {
-        let dir = std::env::temp_dir().join("ag_inspect_missing_test");
+        let dir = std::env::temp_dir().join(format!("ag_inspect_missing_test_{}", std::process::id()));
         fs::create_dir_all(&dir).expect("temp dir");
         let bin = dir.join("neither.bin");
         fs::write(&bin, b"some content without any known signatures").expect("write");

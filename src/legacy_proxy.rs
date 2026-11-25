@@ -17,6 +17,7 @@ pub fn port() -> u16 {
         .unwrap_or(DEFAULT_PORT)
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn default_url() -> String {
     url_at(DEFAULT_PORT)
 }

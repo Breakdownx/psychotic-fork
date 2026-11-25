@@ -34,9 +34,6 @@ pub struct Report {
     /// The route the table currently puts first, by `routes::Kind::label()`.
     /// Empty until the first probe lands.
     pub route: String,
-    /// Until when substitution is forced on because of a refusal. 0 = not
-    /// forced, which is the ordinary state.
-    pub forced_until: u64,
     /// Whether the DNS layer is standing down for a tunnel carrying the client.
     /// Always false since D25 - the bypass carries the gate hosts on every
     /// network - and kept so an older window reading a newer record still parses.
@@ -150,16 +147,6 @@ impl Report {
             && now.saturating_sub(self.reached_at.max(self.started_at)) >= limit
     }
 
-    /// How much of the forced-substitution window is left. Only ever set with
-    /// the loopback door down (D25's fallback, `resolvers::force_substitution`).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn forced_left(&self) -> Option<Duration> {
-        self.forced_until
-            .checked_sub(now_unix())
-            .filter(|left| *left > 0)
-            .map(Duration::from_secs)
-    }
-
     /// Everything the window draws, `at` excepted.
     ///
     /// `at` moves every warm pass and changes nothing on screen, so comparing it
@@ -169,7 +156,6 @@ impl Report {
     /// that reads the file fresh when the button is pressed.
     fn same_state_as(&self, other: &Report) -> bool {
         self.route == other.route
-            && self.forced_until == other.forced_until
             && self.stood_down == other.stood_down
             && self.last_400 == other.last_400
             && self.last_ok == other.last_ok
@@ -258,7 +244,6 @@ fn update(change: impl FnOnce(&mut Report)) {
 /// What the relay is doing now, as one warm pass sees it.
 pub struct Now<'a> {
     pub route: Option<&'a str>,
-    pub forced_for: Option<Duration>,
     pub stood_down: bool,
     pub loopback: bool,
     pub tunnel: bool,
@@ -271,7 +256,6 @@ pub fn publish(now: Now<'_>) {
         if let Some(route) = now.route {
             r.route = route.to_string();
         }
-        r.forced_until = now.forced_for.map_or(0, |left| now_unix() + left.as_secs());
         r.stood_down = now.stood_down;
         r.loopback = now.loopback;
         r.tunnel = now.tunnel;
@@ -785,21 +769,6 @@ mod tests {
         };
         assert!(!ahead.is_stale());
         assert_eq!(ahead.age(), Duration::ZERO);
-    }
-
-    #[test]
-    fn the_forced_window_counts_down_and_then_stops() {
-        let forced = Report {
-            forced_until: now_unix() + 600,
-            ..Report::default()
-        };
-        assert!(forced.forced_left().is_some_and(|d| d.as_secs() > 590));
-        let over = Report {
-            forced_until: now_unix() - 1,
-            ..Report::default()
-        };
-        assert_eq!(over.forced_left(), None);
-        assert_eq!(Report::default().forced_left(), None);
     }
 
     /// A relay nothing answers is cut off only once it has run long enough to

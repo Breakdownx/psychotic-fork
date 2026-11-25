@@ -75,6 +75,10 @@ struct FileState {
     blocked: u32,
     blocked_for: Option<(u64, SystemTime)>,
     deferred_until: Option<((u64, SystemTime), Instant)>,
+    /// The file shape macOS App Management last refused, so the refusal is
+    /// logged once per shape rather than on every retry.
+    #[cfg(target_os = "macos")]
+    refused_for: Option<(u64, SystemTime)>,
     /// The app this watcher closed to free a locked server; it is started again
     /// once the patch has landed (or has been given up on), so an update never
     /// leaves the user's window closed.
@@ -88,6 +92,12 @@ struct FileState {
 /// even reached), and after this many tries the app is left alone unpatched
 /// rather than being killed forever.
 const MAX_LAUNCH_HOLDS: u32 = 3;
+
+/// How often a write macOS App Management refused is tried again. Only the user
+/// can lift it (System Settings), and nothing about the file changes when they
+/// do, so the retry is what makes a fresh grant take effect without a restart.
+#[cfg(target_os = "macos")]
+const APP_MGMT_RETRY: Duration = Duration::from_secs(5 * 60);
 
 /// Spawns the watcher. Returns immediately; the relay's own loop keeps the
 /// process alive. A panic here must not take the relay down (release builds
@@ -290,6 +300,19 @@ fn inspect(target: &Path, st: &mut FileState) {
         RepatchOutcome::Deferred(e) => {
             log(&format!("additive patch deferred, LS left running: {} - {}", show(target), e));
             st.deferred_until = Some((cur, Instant::now() + Duration::from_secs(30)));
+        }
+        #[cfg(target_os = "macos")]
+        RepatchOutcome::Failed(e) if crate::macos::is_app_management_refusal(&e) => {
+            if st.refused_for != Some(cur) {
+                st.refused_for = Some(cur);
+                log(&format!(
+                    "macOS не даёт записать, повторю через {} мин: {} - {}",
+                    APP_MGMT_RETRY.as_secs() / 60,
+                    show(target),
+                    e
+                ));
+            }
+            st.deferred_until = Some((cur, Instant::now() + APP_MGMT_RETRY));
         }
         RepatchOutcome::Failed(e) => {
             // The file is settled but the write did not land. Usually that is
@@ -514,7 +537,7 @@ mod tests {
     /// on the second poll, never the first.
     #[test]
     fn a_reverted_binary_in_an_install_is_repatched_after_settling() {
-        let inst = std::env::temp_dir().join("ag_watchdog_wiring");
+        let inst = std::env::temp_dir().join(format!("ag_watchdog_wiring_{}", std::process::id()));
         fs::create_dir_all(&inst).expect("temp inst");
         // `binary_targets` returns canonical paths, and on macOS the temp dir is
         // behind a symlink (/var -> /private/var), so compare like with like.
@@ -560,7 +583,7 @@ mod tests {
     /// so Antigravity runs and shows its own error.
     #[test]
     fn an_unrecognised_binary_is_left_for_the_app_to_error_on() {
-        let inst = std::env::temp_dir().join("ag_watchdog_giveup");
+        let inst = std::env::temp_dir().join(format!("ag_watchdog_giveup_{}", std::process::id()));
         fs::create_dir_all(&inst).expect("temp inst");
         let agy = inst.join("agy.exe");
         let contents = b"a new build shape this patcher does not know";

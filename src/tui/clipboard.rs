@@ -3,6 +3,7 @@
 use std::io::Write as _;
 
 pub(super) enum Copied {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     Clipboard,
     Terminal,
 }

@@ -1,10 +1,16 @@
+// The NRPT layer is Windows-only; elsewhere `setup_dns_nrpt` reports it as not
+// ported, and the rest of this module stays compiled for its tests.
+#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+
 use std::process::Command;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::background;
 use crate::dns_forwarder;
-use crate::egress::{self, Egress};
+use crate::egress;
+#[cfg(target_os = "windows")]
+use crate::egress::Egress;
 use crate::hosts_pin;
 use crate::resolvers;
 use crate::utils::{bounded_output, no_window, powershell};
@@ -149,7 +155,6 @@ const IPV4_PREFIX_PREFERRED_PRECEDENCE: &str = "46";
 // explicitly whenever we change the rules ourselves.
 static NRPT_CACHE: Mutex<Option<bool>> = Mutex::new(None);
 
-#[allow(dead_code)]
 pub fn invalidate_cache() {
     if let Ok(mut c) = NRPT_CACHE.lock() {
         *c = None;
@@ -334,58 +339,20 @@ pub fn is_nrpt_applied() -> bool {
     applied
 }
 
-/// Resolvers to write into the rule.
+/// Resolvers to write into the rule: the local relay, when it runs.
 ///
-/// With the local relay running it goes first and the real resolvers stay on as
-/// fallbacks, so a relay that is down degrades to the direct path instead of
-/// leaving the names unresolvable. IPv6 is dropped in that case: Windows is free
-/// to pick a v6 resolver, and that query would leave through the tunnel and skip
-/// the relay entirely.
-/// The NRPT nameserver list for one specific name.
-///
-/// The relay goes first; it does the smart per-query provider selection and is
-/// almost always what answers. The fallbacks matter only when the relay is slow
-/// or down - and they must contain **only providers that actually substitute
-/// this name**. A provider that returns the genuine Google address here is not
-/// a harmless fallback: Windows will occasionally prefer its fast genuine answer
-/// over the relay's and cache it for minutes, and the region error comes back
-/// (measured: xbox-dns leaked genuine for `daily-cloudcode-pa` ~1 query in 8).
-///
-/// When nobody substitutes the name (`antigravity-unleash` is genuine
-/// everywhere; `cloudcode-pa` is no longer proxied by anyone), genuine is the
-/// only answer there is, so every provider is listed as a plain resolver -
-/// there is nothing to leak.
-fn nameservers_for(name: &str, via_relay: bool, if_index: u32) -> Vec<String> {
-    assemble_nameservers(via_relay, &resolvers::substituting_addrs(name, if_index))
-}
-
-/// The pure half of `nameservers_for`, split out so the ordering rules can be
-/// tested without a live network probe. `substituters` is what actually proxies
-/// the name; empty means nobody does.
-fn assemble_nameservers(via_relay: bool, substituters: &[&str]) -> Vec<String> {
-    let mut servers: Vec<String> = Vec::new();
+/// The relay does the per-query provider choice. A plain fallback behind it
+/// would have to be a provider that answers on UDP:53 **and** substitutes the
+/// name - one that returns genuine Google leaks it (I22) - and the pool has
+/// none: its only provider speaks DoH, which Windows cannot be pointed at, and
+/// the user's own servers are only the relay's to ask. So without the relay the
+/// rule names no resolver of ours.
+fn nameservers(via_relay: bool) -> Vec<String> {
     if via_relay {
-        servers.push(dns_forwarder::LISTEN_IP.to_string());
-    }
-
-    if substituters.is_empty() {
-        for s in resolvers::fallback_v4() {
-            servers.push(s.to_string());
-        }
+        vec![dns_forwarder::LISTEN_IP.to_string()]
     } else {
-        for s in substituters {
-            servers.push(s.to_string());
-        }
+        Vec::new()
     }
-
-    // IPv6 only without the relay: with the relay up a v6 nameserver would let
-    // Windows send the query out of the tunnel, skipping the relay entirely.
-    if !via_relay {
-        for s in resolvers::all_v6() {
-            servers.push(s.to_string());
-        }
-    }
-    servers
 }
 
 fn ps_string_list_owned(items: &[String]) -> String {
@@ -411,9 +378,6 @@ pub struct DnsOutcome {
     pub pin_error: Option<String>,
     /// Names another tool was routing that this run claimed.
     pub taken_over: Vec<String>,
-    /// True when the probe budget ran out and the remaining names were given the
-    /// full provider list instead of a measured one.
-    pub probe_gave_up: bool,
 }
 
 /// Takes our namespaces away from any other tool's NRPT rule, and reports what
@@ -518,30 +482,6 @@ fn pin_substituted_hosts(namespaces: &[&str], if_index: u32) -> Result<Vec<Strin
     Ok(pinned)
 }
 
-/// One character of progress on the caller's line.
-fn tick() {
-    use std::io::Write;
-    // Was a progress dot on the console line. The window has no console, and the
-    // step is reported as a whole when it finishes.
-    std::io::stdout().flush().ok();
-}
-
-/// Longest the whole rule-building probe may take.
-///
-/// There has to be a bound. `substituting_addrs` asks every provider about every
-/// name over UDP/53, and `ask_provider` walks a provider's addresses one at a
-/// time at `QUERY_TIMEOUT` each; where those queries are simply dropped - a
-/// corporate firewall, some VPN configurations - the arithmetic reaches minutes,
-/// all of it behind one printed line with nothing moving. That is what users
-/// reported as an eternal hang at "Патч для Google серверов...".
-///
-/// Past this, the remaining names get the full provider list - the same list a
-/// name nobody substitutes gets anyway. The cost is that the fallback may then
-/// hold a provider that returns genuine Google for that name (I22), which is a
-/// rule that leaks when the relay is slow. A leak that degrades beats a hang
-/// that does not end, and the relay is still listed first.
-const PROBE_BUDGET: Duration = Duration::from_secs(25);
-
 /// Limit for the small helpers here (`netsh`). Short, because they answer in
 /// milliseconds when they answer at all.
 const HELPER_LIMIT: Duration = Duration::from_secs(15);
@@ -583,27 +523,9 @@ pub fn setup_dns_nrpt() -> Result<DnsOutcome, String> {
     // silently and would make everything below pointless for that name.
     let taken_over = take_over_conflicting_rules(&namespaces);
 
-    // Each name gets its own rule with its own nameserver list, because which
-    // providers substitute a name differs per name (only geohide proxies
-    // `daily-cloudcode-pa`; xbox-dns and comss return genuine Google for it).
-    // The probe leaves through the ISP interface so a tunnel does not hide the
-    // substitution.
-    let probe_if = egress.as_ref().map(|e| e.if_index).unwrap_or(0);
-    let probe_until = Instant::now() + PROBE_BUDGET;
-    let mut probe_gave_up = false;
+    let servers = nameservers(via_relay);
     let mut adds = String::new();
     for (i, name) in namespaces.iter().enumerate() {
-        let servers = if Instant::now() < probe_until {
-            // A dot per name, because the probing below is network-bound and the
-            // caller has already printed its label: without this the step is a
-            // motionless line for as long as the queries take, which is what an
-            // eternal hang looks like from the outside.
-            tick();
-            nameservers_for(name, via_relay, probe_if)
-        } else {
-            probe_gave_up = true;
-            assemble_nameservers(via_relay, &[])
-        };
         adds.push_str(&format!(
             "try {{ Add-DnsClientNrptRule -Namespace '{name}' -NameServers @({ns}) \
                -Comment '{tag}' -DisplayName 'AG Unlocker {canary} {token} {i}' -ErrorAction Stop }} \
@@ -671,7 +593,6 @@ pub fn setup_dns_nrpt() -> Result<DnsOutcome, String> {
         pinned,
         pin_error,
         taken_over,
-        probe_gave_up,
     })
 }
 
@@ -714,15 +635,6 @@ pub fn outcome_note(o: &DnsOutcome) -> Option<String> {
                 }
             }
             .to_string(),
-        );
-    }
-
-    if o.probe_gave_up {
-        lines.push(
-            "  \x1b[33mПроверка DNS-провайдеров не уложилась в отведённое время —\n  \
-             правила записаны по общему списку. Обычно это значит, что запросы\n  \
-             к DNS блокирует сеть или VPN.\x1b[0m\x1b[92m"
-                .to_string(),
         );
     }
 
@@ -842,7 +754,6 @@ mod tests {
             pinned: Vec::new(),
             pin_error: None,
             taken_over: vec!["cloudcode-pa.googleapis.com (OTHER)".to_string()],
-            probe_gave_up: true,
         };
         let note = outcome_note(&o).expect("должно быть сообщение");
         assert!(note.contains("VPN"), "{}", note);
@@ -867,7 +778,6 @@ mod tests {
             pinned: Vec::new(),
             pin_error: None,
             taken_over: Vec::new(),
-            probe_gave_up: false,
         };
 
         let excluded = outcome_note(&with(egress::ClientEgress::Physical)).expect("сообщение");
@@ -891,6 +801,14 @@ mod tests {
             "{:?}",
             outcome_note(&plain)
         );
+    }
+
+    /// Only the relay is ever written into a rule: the pool has no provider a
+    /// Windows nameserver list could hold (see `nameservers`).
+    #[test]
+    fn the_rule_names_the_relay_and_nothing_else() {
+        assert_eq!(nameservers(true), vec![dns_forwarder::LISTEN_IP.to_string()]);
+        assert!(nameservers(false).is_empty());
     }
 
     #[test]
@@ -930,77 +848,6 @@ mod tests {
         assert!(parse_conflicts(out, AG_NRPT_CORE).is_empty());
     }
 
-    #[test]
-    fn the_relay_goes_first_in_the_rule() {
-        // A name only geohide substitutes: the fallback is geohide alone -
-        // never a provider that returns genuine Google for it.
-        let geohide = "45.155.204.190";
-        let servers = assemble_nameservers(true, &[geohide]);
-        assert_eq!(
-            servers.first().map(|s| s.as_str()),
-            Some(dns_forwarder::LISTEN_IP)
-        );
-        assert!(servers.iter().any(|s| s == geohide));
-        // The genuine-returning providers must NOT be in this name's fallback.
-        for other in ["111.88.96.50", "83.220.169.155"] {
-            assert!(
-                !servers.iter().any(|s| s == other),
-                "a non-substituting provider leaked into the fallback: {:?}",
-                servers
-            );
-        }
-        // No IPv6 while the relay is up.
-        assert!(!servers.iter().any(|s| s.contains(':')));
-    }
-
-    #[test]
-    fn a_name_nobody_substitutes_lists_every_reachable_provider() {
-        // antigravity-unleash is genuine everywhere - there is nothing to leak,
-        // so all providers serve as plain resolvers behind the relay.
-        //
-        // "Every provider" means every provider Windows can be pointed at. A DoH
-        // provider has no UDP address by construction (see `resolvers::Transport`)
-        // and must stay out of the list even here, where the rule is at its most
-        // permissive: a nameserver that answers nothing is worse than one fewer
-        // fallback.
-        let servers = assemble_nameservers(true, &[]);
-        for p in resolvers::PROVIDERS {
-            match p.v4.first() {
-                Some(first) => assert!(
-                    servers.iter().any(|s| s == first),
-                    "{} missing from {:?}",
-                    p.name,
-                    servers
-                ),
-                None => {
-                    if let resolvers::Transport::Doh(endpoint) = p.transport {
-                        for a in endpoint.addrs {
-                            assert!(
-                                !servers.iter().any(|s| s == a),
-                                "DoH address {} leaked into a nameserver list",
-                                a
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn without_the_relay_ipv6_is_listed_and_loopback_is_not() {
-        let servers = assemble_nameservers(false, &["31.25.239.132"]);
-        assert!(!servers.iter().any(|s| s == dns_forwarder::LISTEN_IP));
-        // Whatever v6 resolvers the pool has belong in the no-relay list (since
-        // 2.31.0 it has none: eu.geohide.ru is IPv4 only).
-        assert_eq!(
-            servers.iter().any(|s| s.contains(':')),
-            !resolvers::all_v6().is_empty(),
-            "v6 resolvers belong in the no-relay list: {:?}",
-            servers
-        );
-    }
-
     /// The end-to-end path this machine can actually exercise: resolve through
     /// the ISP link past a live tunnel and rewrite the real hosts block, exactly
     /// as startup does. Needs admin, a live network and the rules already in
@@ -1021,7 +868,7 @@ mod tests {
             eg.as_ref().map(|e| e.vpn_active)
         );
         if let Some(eg) = &eg {
-            let server: Ipv4Addr = resolvers::PROVIDERS[0].v4[0].parse().unwrap();
+            let server: Ipv4Addr = resolvers::REFERENCE_V4[0].parse().unwrap();
             for ns in AG_NRPT_CORE {
                 println!(
                     "  {}\n    isp={:?}\n    tun={:?}\n    best={:?}",

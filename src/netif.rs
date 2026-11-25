@@ -163,10 +163,12 @@ pub fn is_tunnel(iface: &Iface) -> bool {
         || named_like_tunnel(&iface.name)
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn sources_use_vpn(sources: &[IpAddr]) -> bool {
     !sources.is_empty() && vpn_carries(sources, &interfaces())
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn vpn_carries(sources: &[IpAddr], ifaces: &[Iface]) -> bool {
     let up = libc::IFF_UP as u32;
     let loopback = libc::IFF_LOOPBACK as u32;

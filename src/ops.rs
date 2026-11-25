@@ -30,6 +30,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::settings::Settings;
@@ -75,7 +76,8 @@ pub fn spawn(events: Sender<Event>, wake: Box<dyn Fn() + Send>) -> Worker {
 
 struct Ctx {
     events: Sender<Event>,
-    wake: Box<dyn Fn() + Send>,
+    /// Shared with `Busy`, which lives on this thread only - hence `Rc`.
+    wake: Rc<dyn Fn() + Send>,
     settings: Settings,
     /// What the last deep pass found, per install.
     ///
@@ -101,6 +103,20 @@ struct Ctx {
     dns_probe: (bool, bool),
 }
 
+/// The busy marker of one command; clears it on drop (`Ctx::busy_with`). Holds
+/// its own handles rather than borrowing `Ctx`, which the command needs `&mut`.
+struct Busy {
+    events: Sender<Event>,
+    wake: Rc<dyn Fn() + Send>,
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        let _ = self.events.send(Event::Busy(None));
+        (self.wake)();
+    }
+}
+
 /// How much of the system a refresh is allowed to ask about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scan {
@@ -124,6 +140,15 @@ impl Ctx {
     fn busy(&self, what: Option<&str>) {
         let _ = self.events.send(Event::Busy(what.map(|s| s.to_string())));
         (self.wake)();
+    }
+    /// Shows `what` as the running job until the returned guard is dropped, so
+    /// every way out of a command - `continue` and `return` included - clears it.
+    fn busy_with(&self, what: &str) -> Busy {
+        self.busy(Some(what));
+        Busy {
+            events: self.events.clone(),
+            wake: Rc::clone(&self.wake),
+        }
     }
     /// Writes `settings.json`. A failed write never stops the action that
     /// changed the setting, but it is said: otherwise the switch reads as saved
@@ -151,7 +176,7 @@ fn run_worker(
 ) {
     let mut ctx = Ctx {
         events,
-        wake,
+        wake: Rc::from(wake),
         settings: Settings::load(),
         patched_seen: HashMap::new(),
         vpn: None,
@@ -223,12 +248,11 @@ fn run_worker(
                 push_status(&mut ctx, Scan::Settings);
             }
             Cmd::DeepRefresh => {
-                ctx.busy(Some("Проверка установок"));
+                let _busy = ctx.busy_with("Проверка установок");
                 push_status(&mut ctx, Scan::Deep);
-                ctx.busy(None);
             }
             Cmd::Set(cap, on) => {
-                ctx.busy(Some(cap.title()));
+                let _busy = ctx.busy_with(cap.title());
                 apply(&mut ctx, cap, on);
                 ctx.save_settings();
                 push_status(&mut ctx, scan_after(cap));
@@ -238,7 +262,6 @@ fn run_worker(
                 if cap == Cap::Watchdog && on && auto_patch_found(&mut ctx) {
                     push_status(&mut ctx, Scan::Deep);
                 }
-                ctx.busy(None);
             }
             Cmd::AddPath(p) => {
                 if !ctx.settings.manual_paths.contains(&p) {
@@ -252,22 +275,20 @@ fn run_worker(
                 {
                     let _ = crate::launch_guard::uninstall();
                 }
-                ctx.busy(Some("Проверка установок"));
+                let _busy = ctx.busy_with("Проверка установок");
                 push_status(&mut ctx, Scan::Deep);
                 // The path the user just pointed at is an install found at last.
                 if auto_patch_found(&mut ctx) {
                     push_status(&mut ctx, Scan::Deep);
                 }
-                ctx.busy(None);
             }
             Cmd::PatchInstall(p) => {
-                ctx.busy(Some("Патч"));
+                let _busy = ctx.busy_with("Патч");
                 let label = crate::installs::install_label(&p);
                 if !patch_found(&mut ctx, vec![(label, p)]) {
                     ctx.log(Level::Warn, format!("{}: патч не записан, см. выше", label));
                 }
                 push_status(&mut ctx, Scan::Deep);
-                ctx.busy(None);
             }
             Cmd::ForgetPath(p) => {
                 ctx.settings.manual_paths.retain(|x| x != &p);
@@ -280,17 +301,15 @@ fn run_worker(
                 push_status(&mut ctx, Scan::Settings);
             }
             Cmd::EnableAll => {
-                ctx.busy(Some("Включаю"));
+                let _busy = ctx.busy_with("Включаю");
                 enable_all(&mut ctx);
                 ctx.save_settings();
                 push_status(&mut ctx, Scan::Deep);
-                ctx.busy(None);
             }
             Cmd::Deactivate => {
-                ctx.busy(Some("Полная деактивация"));
+                let _busy = ctx.busy_with("Полная деактивация");
                 if cfg!(windows) && !is_admin() {
                     ctx.log(Level::Err, "Для полной деактивации запустите анлокер от администратора.");
-                    ctx.busy(None);
                     continue;
                 }
                 ctx.settings.client_patch = false;
@@ -299,7 +318,6 @@ fn run_worker(
                 ctx.settings.dns = false;
                 if !ctx.settings.save() {
                     ctx.log(Level::Err, "Не удалось сохранить отключение автопатча; откат не начат.");
-                    ctx.busy(None);
                     continue;
                 }
                 let errors = crate::deactivate::run(&ctx.settings.manual_paths);
@@ -313,14 +331,12 @@ fn run_worker(
                 }
                 ctx.log(Level::Warn, "Деактивация не завершена. Устраните ошибки и повторите.");
                 push_status(&mut ctx, Scan::Deep);
-                ctx.busy(None);
             }
             Cmd::Repair => {
-                ctx.busy(Some("Чиню службу обхода"));
+                let _busy = ctx.busy_with("Чиню службу обхода");
                 repair(&mut ctx);
                 ctx.save_settings();
                 push_status(&mut ctx, Scan::System);
-                ctx.busy(None);
             }
             Cmd::ReorderProviders(order) => {
                 ctx.settings.provider_order = order;
@@ -361,20 +377,10 @@ fn run_worker(
                     );
                 }
                 ctx.save_settings();
-                // The switch is shown as flipped **now**: the file is written and
-                // the relay re-reads it within seconds. Rewriting the NRPT rules
-                // is PowerShell and takes a second or more, so it comes after,
-                // and only when the flipped provider is one of the addresses
-                // those rules list (a DoH or user-typed server is not).
+                // The file is written and the relay re-reads it within seconds.
+                // The NRPT rules name only the relay, never a provider, so there
+                // is nothing on the machine to rewrite.
                 push_status(&mut ctx, Scan::Settings);
-                let in_rules = crate::resolvers::udp_provider_names()
-                    .iter()
-                    .any(|n| n.eq_ignore_ascii_case(&name));
-                if in_rules && reapply_dns_rules(&mut ctx) {
-                    // Only when the rules were actually rewritten is there
-                    // anything new on the machine to read back.
-                    push_status(&mut ctx, Scan::System);
-                }
             }
         }
     }
@@ -1800,7 +1806,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let mut ctx = Ctx {
             events: tx,
-            wake: Box::new(|| {}),
+            wake: Rc::new(|| {}),
             settings: Settings::load(),
             patched_seen: HashMap::new(),
             vpn: Some(VpnSeen::None),

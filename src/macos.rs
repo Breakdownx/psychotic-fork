@@ -21,9 +21,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Label prefix of every launchd job this tool owns.
-pub const LABEL_PREFIX: &str = "com.agunlocker";
-
 /// The job that re-sets the proxy variable at every login.
 pub const ENV_LABEL: &str = "com.agunlocker.env";
 
@@ -132,9 +129,7 @@ pub fn strip_quarantine(path: &Path) {
 /// приложениями» (App Management) may change it, even when the files are the
 /// user's own - and the error is a plain EPERM.
 pub fn app_management_hint(path: &Path, err: &str) -> String {
-    if bundle_of(path).is_some()
-        && (err.contains("Operation not permitted") || err.contains("os error 1)"))
-    {
+    if bundle_of(path).is_some() && is_eperm_text(err) {
         format!(
             "{err}. macOS не дал изменить приложение: Системные настройки → \
              Конфиденциальность и безопасность → Управление приложениями → \
@@ -144,6 +139,18 @@ pub fn app_management_hint(path: &Path, err: &str) -> String {
     } else {
         err.to_string()
     }
+}
+
+/// Whether an error's text is EPERM - how macOS words a TCC refusal, as opposed
+/// to EACCES for the permission bits.
+pub fn is_eperm_text(err: &str) -> bool {
+    err.contains("Operation not permitted") || err.contains("os error 1)")
+}
+
+/// Whether `err` came from App Management: `app_management_hint` has already
+/// turned it into the instruction, or it is the bare EPERM.
+pub fn is_app_management_refusal(err: &str) -> bool {
+    err.contains("Управление приложениями") || is_eperm_text(err)
 }
 
 /// Whether macOS App Management (TCC) would refuse a write to `target`, probed
@@ -178,10 +185,7 @@ pub fn write_blocked_by_app_management(target: &Path) -> bool {
             let _ = fs::remove_file(&probe);
             false
         }
-        Err(e) => {
-            let s = e.to_string();
-            s.contains("Operation not permitted") || s.contains("os error 1)")
-        }
+        Err(e) => is_eperm_text(&e.to_string()),
     }
 }
 
@@ -385,6 +389,17 @@ mod tests {
         assert!(p.contains("<string>/a b/c&amp;d</string>"));
         assert!(p.contains("<string>&lt;v&gt;</string>"));
         assert!(p.contains("<key>KeepAlive</key>"));
+    }
+
+    #[test]
+    fn an_eperm_reads_as_app_management_and_an_eacces_does_not() {
+        let eperm = std::io::Error::from_raw_os_error(1).to_string();
+        let eacces = std::io::Error::from_raw_os_error(13).to_string();
+        assert!(is_app_management_refusal(&eperm));
+        assert!(!is_app_management_refusal(&eacces));
+        let bin = Path::new("/Applications/Antigravity.app/Contents/Resources/bin/language_server");
+        assert!(is_app_management_refusal(&app_management_hint(bin, &eperm)));
+        assert_eq!(app_management_hint(bin, &eacces), eacces);
     }
 
     #[test]

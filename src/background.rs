@@ -556,7 +556,7 @@ mod windows_impl {
         /// The upgrade path depends on spotting a stale installed copy.
         #[test]
         fn a_differing_installed_copy_is_detected() {
-            let dir = env::temp_dir().join("ag_relay_copy_test");
+            let dir = env::temp_dir().join(format!("ag_relay_copy_test_{}", std::process::id()));
             fs::create_dir_all(&dir).expect("temp dir");
             let (a, b) = (dir.join("a.bin"), dir.join("b.bin"));
 
@@ -864,6 +864,11 @@ mod unix_impl {
     #[cfg(target_os = "macos")]
     pub fn is_running() -> bool {
         crate::macos::agent_is_running(PROXY_LABEL)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn is_watchdog_running() -> bool {
+        crate::macos::agent_is_running(WATCHDOG_LABEL)
     }
 
     /// Compatibility entry point: the retired HTTP proxy cannot be installed.
