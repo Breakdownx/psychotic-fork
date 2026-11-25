@@ -24,6 +24,10 @@ use std::process::{Command, Stdio};
 /// The job that re-sets the proxy variable at every login.
 pub const ENV_LABEL: &str = "com.agunlocker.env";
 
+/// The app's bundle identifier, as `macos/Info.plist` and `macos/build.sh`
+/// spell it (a test keeps the three equal).
+pub const APP_BUNDLE_ID: &str = "local.antigravity.unlocker";
+
 pub fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
 }
@@ -251,11 +255,17 @@ fn xml_escape(s: &str) -> String {
 
 /// A user agent's plist. `keep_alive` restarts it when it exits (a service);
 /// without it the job runs once per login (the environment setter).
+///
+/// `app` names the bundle the job belongs to (`AssociatedBundleIdentifiers`).
+/// Without it System Settings → Login Items lists the job by its executable -
+/// `ag_unlocker` with a generic «exec» icon - which reads as an unknown
+/// process; with it, as the app, with its name and icon.
 pub fn agent_plist(
     label: &str,
     args: &[String],
     env: &[(&str, String)],
     keep_alive: bool,
+    app: Option<&str>,
 ) -> String {
     let mut s = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -282,6 +292,12 @@ pub fn agent_plist(
             ));
         }
         s.push_str("  </dict>\n");
+    }
+    if let Some(app) = app {
+        s.push_str(&format!(
+            "  <key>AssociatedBundleIdentifiers</key>\n  <array>\n    <string>{}</string>\n  </array>\n",
+            xml_escape(app)
+        ));
     }
     s.push_str("  <key>RunAtLoad</key>\n  <true/>\n");
     if keep_alive {
@@ -410,10 +426,32 @@ mod tests {
             &["/a b/c&d".into()],
             &[("K", "<v>".into())],
             true,
+            None,
         );
         assert!(p.contains("<string>/a b/c&amp;d</string>"));
         assert!(p.contains("<string>&lt;v&gt;</string>"));
         assert!(p.contains("<key>KeepAlive</key>"));
+        assert!(!p.contains("AssociatedBundleIdentifiers"));
+    }
+
+    /// The service is listed under the app (Login Items), and the id it names
+    /// is the one the app is built with: Info.plist and build.sh say the same.
+    #[test]
+    fn the_service_names_the_app_it_belongs_to() {
+        let p = agent_plist("com.agunlocker.watchdog", &["x".into()], &[], true, Some(APP_BUNDLE_ID));
+        assert!(p.contains(&format!(
+            "<key>AssociatedBundleIdentifiers</key>\n  <array>\n    <string>{APP_BUNDLE_ID}</string>"
+        )));
+        // A plist launchd would reject is a service that never starts.
+        let file = std::env::temp_dir().join(format!("ag_agent_{}.plist", std::process::id()));
+        fs::write(&file, &p).unwrap();
+        let lint = Command::new("/usr/bin/plutil").arg("-lint").arg(&file).output().unwrap();
+        fs::remove_file(&file).ok();
+        assert!(lint.status.success(), "{}", String::from_utf8_lossy(&lint.stdout));
+        let info = include_str!("../macos/Info.plist");
+        assert!(info.contains(&format!("<string>{APP_BUNDLE_ID}</string>")), "Info.plist");
+        let build = include_str!("../macos/build.sh");
+        assert!(build.contains(&format!("BIN_ID=\"{APP_BUNDLE_ID}\"")), "build.sh");
     }
 
     #[test]

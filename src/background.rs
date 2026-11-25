@@ -977,6 +977,7 @@ mod unix_impl {
             &[installed_exe().display().to_string(), flag.to_string()],
             &[("XDG_DATA_HOME", data_home)],
             true,
+            Some(crate::macos::APP_BUNDLE_ID),
         )
     }
 
