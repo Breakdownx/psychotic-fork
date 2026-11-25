@@ -113,8 +113,11 @@ pub fn build(status: Option<&Status>, view: &View) -> String {
         );
     }
 
-    // Fresh from the file, not the window's copy: the route table's ages move
-    // every pass and the watcher does not wake the window for them.
+    if !cfg!(target_os = "windows") {
+        return out;
+    }
+
+    // Read the current DNS service heartbeat rather than the window's copy.
     let _ = writeln!(out, "\n— Служба обхода (её запись)");
     match crate::gate::read() {
         Some(r) => relay_part(&mut out, &r),
@@ -127,9 +130,8 @@ pub fn build(status: Option<&Status>, view: &View) -> String {
     let log = std::fs::read_to_string(crate::dns_forwarder::log_path()).unwrap_or_default();
     let lines: Vec<&str> = log.lines().collect();
     let from = lines.len().saturating_sub(LOG_LINES);
-    let own = crate::upstream::configured().map(|u| u.display());
     for line in &lines[from..] {
-        let _ = writeln!(out, "{}", mask_addresses(line, own.as_deref()));
+        let _ = writeln!(out, "{}", mask_addresses(line, None));
     }
     if lines.is_empty() {
         let _ = writeln!(out, "(пусто)");
@@ -170,29 +172,26 @@ fn status_part(out: &mut String, s: &Status) {
     let _ = writeln!(out, "\n— Переключатели");
     let _ = writeln!(out, "Разблокировка входа: {}", onoff(&s.client_patch));
     let _ = writeln!(out, "Автопатч: {}", onoff(&s.watchdog));
-    let _ = writeln!(out, "Обход через DNS: {}", onoff(&s.dns));
-    let _ = writeln!(out, "Локальный прокси: {}", onoff(&s.local_proxy));
-    let _ = writeln!(out, "Свой прокси: {}", onoff(&s.own_proxy));
-    let _ = writeln!(
-        out,
-        "Служба: {}{}; правила DNS: {}",
-        if s.relay_running {
-            "запущена"
-        } else {
-            "НЕ запущена"
-        },
-        if s.relay_outdated {
-            ", устарела"
-        } else {
-            ""
-        },
-        if s.rules { "есть" } else { "НЕТ" }
-    );
+    if cfg!(target_os = "windows") {
+        let _ = writeln!(out, "Обход через DNS: {}", onoff(&s.dns));
+        let _ = writeln!(
+            out,
+            "Служба: {}{}; правила DNS: {}",
+            if s.relay_running {
+                "запущена"
+            } else {
+                "НЕ запущена"
+            },
+            if s.relay_outdated {
+                ", устарела"
+            } else {
+                ""
+            },
+            if s.rules { "есть" } else { "НЕТ" }
+        );
+    }
     if let Some(vpn) = s.vpn {
         let _ = writeln!(out, "VPN (по сокетам Antigravity): {:?}", vpn);
-    }
-    if let Some(eg) = s.relay_egress {
-        let _ = writeln!(out, "Сокеты службы: {:?}", eg);
     }
 }
 
@@ -204,21 +203,8 @@ fn relay_part(out: &mut String, r: &Report) {
         crate::dns_forwarder::RELAY_VERSION,
         r.age().as_secs()
     );
-    let _ = writeln!(
-        out,
-        "Гейт-хосты через локальные адреса: {}",
-        if r.loopback { "да" } else { "нет" }
-    );
-    for b in &r.blockers {
+    for b in r.blockers.iter().filter(|b| b.what == "dns") {
         let _ = writeln!(out, "Мешает обходу: {}", super::status::blocker_line(b));
-    }
-    if crate::proxy::port() != crate::proxy::DEFAULT_PORT {
-        let _ = writeln!(
-            out,
-            "Порт локального прокси: {} (перенесён со стандартного {})",
-            crate::proxy::port(),
-            crate::proxy::DEFAULT_PORT
-        );
     }
     if r.started_at != 0 {
         let _ = writeln!(
@@ -244,80 +230,7 @@ fn relay_part(out: &mut String, r: &Report) {
             format!(", выход: {}", r.vpn_exit)
         }
     );
-    // The table's own first usable row, not `r.route`: that one is the
-    // hysteresis memory (`routes::leader`) and can still name a route the order
-    // has moved past, which put a headline in the report contradicting the
-    // table printed right under it (field report, 2026-09-20).
-    let first = r
-        .routes
-        .iter()
-        .find(|row| row.usable)
-        .map(|row| row.label.as_str())
-        .unwrap_or(r.route.as_str());
-    let _ = writeln!(out, "Первый маршрут сейчас: {}", non_empty(first));
-    if let Some(ok) = &r.last_ok {
-        let _ = writeln!(
-            out,
-            "Последний ответ модели, который видела служба: {} с назад, маршрут: {}",
-            crate::gate::now_unix().saturating_sub(ok.at),
-            non_empty(&ok.route)
-        );
-    }
-    if let Some(e) = &r.last_400 {
-        let _ = writeln!(
-            out,
-            "Последняя ошибка 400, которую видела служба: {} с назад, строк: {}, маршрут: {}{}",
-            crate::gate::now_unix().saturating_sub(e.at),
-            e.count,
-            non_empty(&e.route),
-            if e.bypassed {
-                " (мимо обхода)"
-            } else {
-                ""
-            }
-        );
-        if !e.acted.is_empty() {
-            let _ = writeln!(out, "Что сделано: {}", e.acted);
-        }
-    }
-    let _ = writeln!(out, "Маршруты (в порядке выбора):");
-    for row in &r.routes {
-        let mut parts: Vec<String> = Vec::new();
-        // One state word, not two: «доступен … отложен ещё на 10 мин» is what a
-        // benched-but-still-offered route used to print, and it reads as a
-        // contradiction to the person pasting it.
-        parts.push(match (row.usable, row.bench_left) {
-            (false, _) => "сейчас не используется".to_string(),
-            (true, Some(b)) => format!("отложен ещё на {} мин, но в очереди", b / 60 + 1),
-            (true, None) => "доступен".to_string(),
-        });
-        if let Some(ms) = row.latency_ms {
-            parts.push(format!("{ms} мс"));
-        }
-        if row.proven {
-            parts.push("проверен ответом модели".to_string());
-        }
-        if let Some(a) = row.ok_ago {
-            parts.push(format!("ответ {a} с назад"));
-        }
-        if let Some(a) = row.refused_ago {
-            parts.push(format!("ошибка 400 {a} с назад"));
-        }
-        // The tally, not just the two timestamps: «ответ 34 с назад, ошибка 400
-        // 14 с назад» is the same line for a route that answers nine times out
-        // of ten and for one that answers once in fifty, and three field
-        // reports (2026-09-21) turned on telling those apart.
-        if row.answers > 0 || row.refusals > 0 {
-            parts.push(format!("ответов {}, отказов {}", row.answers, row.refusals));
-        }
-        if let Some(b) = row.bench_left.filter(|_| !row.usable) {
-            parts.push(format!("отложен ещё на {} мин", b / 60 + 1));
-        }
-        if row.open > 0 {
-            parts.push(format!("открытых соединений: {}", row.open));
-        }
-        let _ = writeln!(out, "  {} — {}", row.label, parts.join(", "));
-    }
+
 }
 
 /// One line of the relay's log with the user's own proxy, and any route's exit
@@ -386,14 +299,6 @@ fn mask_addresses(line: &str, configured: Option<&str>) -> String {
     }
 }
 
-fn non_empty(s: &str) -> &str {
-    if s.is_empty() {
-        "—"
-    } else {
-        s
-    }
-}
-
 #[cfg(test)]
 mod tests {
     /// What «Сохранить отчёт» writes to the file on this machine, minus the
@@ -406,42 +311,6 @@ mod tests {
         let text = super::build(None, &crate::gate::View::default());
         println!("{text}");
         assert!(text.contains("отчёт"));
-    }
-
-    /// The line that says whether a route half-works. Two timestamps read the
-    /// same for a route answering nine times in ten and one answering once in
-    /// fifty, and three field reports (2026-09-21) turned on telling them
-    /// apart.
-    #[test]
-    fn a_route_row_says_how_often_it_answered_and_how_often_it_was_refused() {
-        let relay = crate::gate::Report {
-            at: crate::gate::now_unix(),
-            routes: vec![crate::routes::Row {
-                label: "напрямую".into(),
-                usable: true,
-                latency_ms: Some(479),
-                proven: true,
-                ok_ago: Some(34),
-                refused_ago: Some(14),
-                answers: 21,
-                refusals: 30,
-                open: 2,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        // `relay_part`, not `build`: the report reads the live record off the
-        // disk on purpose (the table's ages move every pass and nothing wakes
-        // the window for them), so a synthesised one only reaches this half.
-        let mut text = String::new();
-        super::relay_part(&mut text, &relay);
-        assert!(
-            text.contains("ответов 21, отказов 30"),
-            "the tally is missing:\n{text}"
-        );
-        // …and the refusal is still shown, which is the half the split of
-        // `bad_at`/`refused_at` must not have cost (G76).
-        assert!(text.contains("ошибка 400 14 с назад"), "{text}");
     }
 
     use super::mask_addresses as mask;

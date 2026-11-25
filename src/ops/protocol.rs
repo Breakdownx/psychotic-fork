@@ -11,10 +11,6 @@ pub enum Cap {
     Watchdog,
     /// The DNS half of the 400 bypass: local relay + NRPT rules.
     Dns,
-    /// Our own CONNECT proxy, named by the private env var the patch installs.
-    LocalProxy,
-    /// The user's own HTTP proxy.
-    OwnProxy,
     /// Whether the DNS pool rotates, or only its first enabled member answers.
     DnsRotation,
     // `VpnDetect` is gone (D25): the layer no longer stands down for a tunnel,
@@ -35,8 +31,6 @@ impl Cap {
             Cap::ClientPatch => "Разблокировать вход в аккаунт",
             Cap::Watchdog => "Автопатч Antigravity",
             Cap::Dns => "Обход через DNS",
-            Cap::LocalProxy => "Локальный прокси",
-            Cap::OwnProxy => "Свой HTTP-прокси",
             Cap::DnsRotation => "Ротация DNS-серверов",
         }
     }
@@ -59,9 +53,8 @@ pub enum State {
     /// said they had been. A note is a note; whether the thing is on is a
     /// separate question and now has a separate variant.
     OffNote(String),
-    /// Cannot be turned on right now, and the reason is not the user's mistake:
-    /// no admin, a foreign proxy that outranks ours, a VPN the layer stood down
-    /// for. Drawn as an off switch with the reason next to it.
+    /// Cannot be turned on right now, for example without administrator rights.
+    /// Drawn as an off switch with the reason next to it.
     Blocked(String),
 }
 
@@ -114,15 +107,6 @@ pub enum VpnSeen {
     /// different sides of a split tunnel, or sockets that outlived a rule
     /// change. The half inside faces the gate from wherever the tunnel exits.
     PartlyCarryingClient,
-    /// A tunnel is up, and Antigravity's own traffic goes to **our** proxy — so
-    /// the socket that faces the gate is the relay's, not the client's.
-    ///
-    /// The ordinary state for a patched client with the local-proxy route on,
-    /// and the one the tool's own success created: excluding `language_server`
-    /// from a VPN stopped meaning anything the moment it stopped making gate
-    /// connections. Whether the *relay* is in the tunnel is a question this
-    /// measurement does not answer (P34).
-    ViaLocalProxy,
     /// A tunnel is up and there was nothing to read: Antigravity is not running,
     /// or has not dialled out yet.
     ///
@@ -153,34 +137,21 @@ pub struct Status {
     pub client_patch: State,
     pub watchdog: State,
     pub dns: State,
-    pub local_proxy: State,
-    pub own_proxy: State,
-    pub own_proxy_configured: bool,
     pub dns_rotation: State,
     /// What the last measurement saw. `None` means it has not been taken yet;
     /// taking it spawns PowerShell, so it is not done on every refresh.
     pub vpn: Option<VpnSeen>,
-    pub own_proxy_text: String,
     pub custom_dns_text: String,
     pub relay_outdated: bool,
     /// Whether the relay task is registered *and* running. The raw fact, kept
-    /// beside the `dns` row that already folds it into a verdict: the gate strip
-    /// has to say "there is nobody to catch the next 400" without re-deriving it
-    /// from a string meant for a switch.
+    /// beside the `dns` row that already folds it into a verdict, so the status
+    /// card can describe DNS service health without parsing a switch label.
     pub relay_running: bool,
     /// Whether our NRPT rules are in. The raw fact, beside `relay_running`, for
     /// the same reason: a running service with no rules is a bypass nobody's
     /// queries ever reach, and the status card has to be able to say so.
     pub rules: bool,
     pub providers: Vec<ProviderRow>,
-    /// Where **our own** service's connections leave. `None` when there was
-    /// nothing to read, or no tunnel to read it against.
-    ///
-    /// The half the client stopped being able to answer (G46), and the one that
-    /// decides whether a provider serving only Russian addresses will serve us
-    /// at all. Reported, never acted on: the stand-down decision is still the
-    /// client's (D13, P34).
-    pub relay_egress: Option<crate::egress::ClientEgress>,
     /// macOS only: an install was found unpatched and its binary cannot be
     /// written because the `.app` bundle is App-Management protected. The card
     /// says what to do about it instead of the bare "пропатчены не все
@@ -194,16 +165,13 @@ impl Status {
             Cap::ClientPatch => &self.client_patch,
             Cap::Watchdog => &self.watchdog,
             Cap::Dns => &self.dns,
-            Cap::LocalProxy => &self.local_proxy,
-            Cap::OwnProxy => &self.own_proxy,
             Cap::DnsRotation => &self.dns_rotation,
         }
     }
 
-    /// The bypass master switch. Derived, never stored: it is on when any part
-    /// of the bypass is, which keeps one truth instead of two.
+    /// The Windows DNS bypass switch, derived from its actual state.
     pub fn bypass_on(&self) -> bool {
-        self.dns.is_on() || self.local_proxy.is_on() || self.own_proxy.is_on()
+        cfg!(target_os = "windows") && self.dns.is_on()
     }
 }
 
@@ -223,7 +191,6 @@ pub enum Event {
     /// `Some(what)` while an action runs, `None` when the queue drains. The UI
     /// dims the switches in between so a second click cannot queue a race.
     Busy(Option<String>),
-    ProxySaved(Cap, Result<(), String>),
     Deactivated,
 }
 
@@ -252,7 +219,6 @@ pub enum Cmd {
     Probed {
         vpn: VpnSeen,
         relay: bool,
-        relay_egress: Option<crate::egress::ClientEgress>,
     },
     /// Re-read the system *including* whether each install is patched, which
     /// means reading every Language Server binary end to end.
@@ -263,10 +229,6 @@ pub enum Cmd {
     ForgetPath(PathBuf),
     /// The «Пропатчить» button of one install row.
     PatchInstall(PathBuf),
-    SetOwnProxy {
-        text: String,
-        enable: bool,
-    },
     SetCustomDns(String),
     SetProvider(String, bool),
     /// The whole pool in the order the user dragged it into.
@@ -276,7 +238,7 @@ pub enum Cmd {
     EnableAll,
     /// Puts the service back the way the switches say it should be: reinstalls
     /// the relay when it is missing, stopped or older than this build, rewrites
-    /// the rules, restores the proxy variable.
+    /// the DNS rules.
     Repair,
     Deactivate,
     #[allow(dead_code)]

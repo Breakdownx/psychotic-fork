@@ -65,8 +65,6 @@ pub fn revert_files(inst: &Path) -> Reverted {
 pub struct Elevated {
     pub label: String,
     pub warnings: Vec<String>,
-    pub proxy_var: bool,
-    pub proxy_var_retryable: bool,
 }
 
 /// Whether patching `inst` needs root: a directory the patch writes into
@@ -249,11 +247,6 @@ pub fn run_helper(arg: Option<String>) -> ! {
             for w in o.warnings {
                 println!("WARN\t{}", one_line(&w));
             }
-            println!(
-                "PROXYVAR\t{}\t{}",
-                u8::from(o.summary.proxy_var > 0),
-                u8::from(o.summary.proxy_var_retryable)
-            );
             std::process::exit(0);
         }
         Err(e) => {
@@ -282,10 +275,6 @@ fn parse_report(stdout: &str) -> Result<Elevated, String> {
             Some("WARN") => done
                 .warnings
                 .push(parts.next().unwrap_or_default().to_string()),
-            Some("PROXYVAR") => {
-                done.proxy_var = parts.next() == Some("1");
-                done.proxy_var_retryable = parts.next() == Some("1");
-            }
             Some("ERR") => return Err(parts.next().unwrap_or_default().to_string()),
             _ => {}
         }
@@ -398,7 +387,6 @@ mod tests {
             .expect("ok");
         assert_eq!(done.label, "Antigravity IDE");
         assert_eq!(done.warnings, vec!["оверрайд не снят".to_string()]);
-        assert!(done.proxy_var && !done.proxy_var_retryable);
         assert_eq!(
             parse_report("ERR\tСигнатура не найдена\n").err().as_deref(),
             Some("Сигнатура не найдена")

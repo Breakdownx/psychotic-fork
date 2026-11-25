@@ -8,8 +8,7 @@
 //! * **One action at most, and a real one.** A card that says what is wrong
 //!   carries the button that fixes it, or says plainly that there is nothing
 //!   to press.
-//! * **What was done is said by the side that did it** (the relay's record),
-//!   never inferred from a switch being on (I58).
+//! * DNS service health and client model answers are separate observations.
 
 use std::time::Duration;
 
@@ -26,8 +25,6 @@ pub enum Tone {
     Ok,
     /// Set up, nothing proven yet: waiting for the user's next message.
     Wait,
-    /// A refusal was seen and is being dealt with.
-    Fixing,
     /// Something only the user can do.
     Action,
     /// Switched off, or nothing to work on.
@@ -66,14 +63,6 @@ pub struct Headline {
     pub action: Option<Action>,
 }
 
-/// What the relay said it did about the last refusal.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Answered {
-    pub acted: String,
-    /// No tunnel of ours carried it: the client went to Google by itself.
-    pub bypassed: bool,
-}
-
 /// Everything the verdict is made of. Plain values, so a test can build any
 /// state the window can be in.
 #[derive(Debug, Clone, Default)]
@@ -84,10 +73,10 @@ pub struct Facts {
     pub installs_found: bool,
     /// The account patch is on everywhere it can be.
     pub patch_on: bool,
-    /// The 400 bypass is on: its DNS half, which everything else rides on - the
-    /// local proxy lives in the same service, and the loopback door only opens
-    /// once the relay answers the gate hosts.
+    /// The Windows DNS integration is on.
     pub bypass_on: bool,
+    /// DNS integration is available on this platform.
+    pub bypass_available: bool,
     pub relay_running: bool,
     pub relay_uses_vpn: bool,
     pub relay_outdated: bool,
@@ -101,17 +90,8 @@ pub struct Facts {
     pub refusal: Option<(Duration, usize)>,
     /// The newest model answer in a client log, how long ago.
     pub answer: Option<Duration>,
-    /// The relay's answer to that refusal, when it wrote one after it.
-    pub answered: Option<Answered>,
-    /// The route the relay credited with the last answer, or the one it would
-    /// use now.
-    pub route: Option<String>,
-    /// What keeps the local proxy from listening, as the relay diagnosed it.
-    pub proxy_blocked: Option<crate::gate::Blocker>,
-    /// What keeps the gate hosts' door on `:443` shut, the same way.
-    pub door_blocked: Option<crate::gate::Blocker>,
-    /// What keeps the DNS relay off `127.0.0.53:53`. Unlike the other two this
-    /// listener cannot be moved - the NRPT rules name an address, not a port -
+    /// What keeps the DNS relay off `127.0.0.53:53`. This listener cannot be
+    /// moved - the NRPT rules name an address, not a port -
     /// so naming the holder is the whole of what can be done about it.
     pub dns_blocked: Option<crate::gate::Blocker>,
     /// The relay has run for minutes and nothing on the internet answered it.
@@ -150,20 +130,8 @@ const VERIFY_FOR: Duration = Duration::from_secs(30 * 60);
 /// between: past that, "send it again" has been tried and did not help.
 const STUCK_LINES: usize = 12;
 
-/// How long a refusal is "happening now" and the card says «Чиним». After it,
-/// with no answer since, the card asks for a check instead: nothing is being
-/// fixed any more, and nothing has been shown to work either.
-const FIXING_FOR: Duration = Duration::from_secs(10 * 60);
-
-/// How far *before* a refusal the relay's note may be stamped and still be an
-/// answer to it: the whole-second quantisation both stamps carry, and nothing
-/// more. A note stamped earlier is an answer to something else (I58).
-const EPISODE_SLACK: u64 = 3;
-
-/// Whether the relay's note answers a refusal stamped at `refusal_at`.
-fn answers(episode_at: u64, refusal_at: u64) -> bool {
-    episode_at.saturating_add(EPISODE_SLACK) >= refusal_at
-}
+/// How long a refusal is current enough to request immediate action.
+const REFUSAL_RECENT: Duration = Duration::from_secs(10 * 60);
 
 impl Facts {
     /// Read off a status snapshot and the gate watcher's last view, which is
@@ -182,56 +150,20 @@ impl Facts {
         // outlives its writer by up to `STALE_AFTER`, and "обход перехватил" about a
         // dead service is the worst sentence this card could say (I58).
         let relay = gate.relay.as_ref().filter(|_| s.relay_running);
-        let answered = refusal.and_then(|(ago, _)| {
-            if ago > crate::gate::RECENT {
-                return None;
-            }
-            let refusal_at = crate::gate::now_unix().saturating_sub(ago.as_secs());
-            relay
-                .and_then(|r| r.last_400.as_ref())
-                .filter(|e| answers(e.at, refusal_at))
-                .map(|e| Answered {
-                    acted: e.acted.clone(),
-                    bypassed: e.bypassed,
-                })
-        });
-        // The path of the last answer when the relay saw one recently - and then
-        // exactly that, empty included: an answer no tunnel of ours carried went
-        // around us, and naming the route we would have used instead would be a
-        // claim about traffic that never touched it. Otherwise the route in force.
-        let route = relay.and_then(|r| {
-            let recent_ok = r.last_ok.as_ref().filter(|ok| {
-                crate::gate::now_unix().saturating_sub(ok.at)
-                    <= crate::gate::ANSWER_RECENT.as_secs()
-            });
-            match recent_ok {
-                Some(ok) => (!ok.route.is_empty()).then(|| ok.route.clone()),
-                None => (!r.route.is_empty()).then(|| r.route.clone()),
-            }
-        });
         Facts {
             admin: s.admin || !cfg!(target_os = "windows"),
             installs_found: s.installs.iter().any(|r| r.path.is_some()),
             patch_on: s.client_patch.is_on(),
             bypass_on: s.bypass_on(),
+            bypass_available: cfg!(target_os = "windows"),
             relay_running: s.relay_running,
-            relay_uses_vpn: s.relay_running
-                && (relay.is_some_and(|r| r.vpn_traffic)
-                    || matches!(
-                        s.relay_egress,
-                        Some(crate::egress::ClientEgress::Tunnel | crate::egress::ClientEgress::Mixed)
-                    )),
+            relay_uses_vpn: s.relay_running && relay.is_some_and(|r| r.vpn_traffic),
             relay_outdated: s.relay_outdated,
-            // Rules are only owed while the DNS switch is on: a route running alone
-            // (own proxy, exits) has none by design.
+            // Rules are only owed while the DNS switch is on.
             rules: s.rules || !s.dns.is_on() || !cfg!(target_os = "windows"),
             relay_reporting: relay.is_some(),
             refusal,
             answer,
-            answered,
-            route,
-            proxy_blocked: blocker(relay, "proxy"),
-            door_blocked: blocker(relay, "door"),
             dns_blocked: blocker(relay, "dns"),
             cut_off: relay.is_some_and(crate::gate::Report::cut_off),
             net_ok: gate.net_ok,
@@ -272,9 +204,8 @@ pub fn provider_name(name: &str) -> String {
 
 /// The master switch of the bypass: what it is called and what it does.
 pub const BYPASS_TEXT: (&str, &str) = (
-    "Снять ошибку 400 в чате с ИИ",
-    "Сам находит рабочий путь до серверов Google и переключается, если путь \
-     перестал работать — с VPN и без.",
+    "Обход через DNS",
+    "Настраивает DNS для серверов Google через выбранные DNS-серверы.",
 );
 
 /// Labels and descriptions for the switches in the terminal.
@@ -293,19 +224,6 @@ pub fn switch_text(cap: Cap) -> (&'static str, &'static str) {
             "Служба на этом компьютере отвечает на имена двух серверов Google и держит их \
              разрешающимися через сервисы разблокировки. Без неё обход не работает.",
         ),
-        Cap::LocalProxy => (
-            "Локальный прокси",
-            "Соединения Antigravity с этими двумя серверами идут через посредника внутри \
-             вашего компьютера: он выбирает путь, который реально работает, и переключается \
-             сам. Содержимое не расшифровывается — посредник только передаёт байты.",
-        ),
-        Cap::OwnProxy => (
-            "Свой HTTP-прокси",
-            "Ваш собственный прокси в разрешённой стране — он всегда пробуется первым. \
-             Формат: логин:пароль@адрес:порт — или просто адрес:порт, если пароля нет, \
-             например ivan:secret@203.0.113.9:3128. Только HTTP-прокси, SOCKS не \
-             подойдёт. Google может не принять прокси из дата-центра даже там.",
-        ),
         Cap::DnsRotation => (
             "Ротация между серверами",
             "Включено: запрос идёт ко всем включённым серверам, ответ сверяется \
@@ -321,11 +239,7 @@ pub fn switch_text(cap: Cap) -> (&'static str, &'static str) {
 /// so the fixes that need no restart say so.
 fn blocked(b: &crate::gate::Blocker, exe: &str) -> Headline {
     let port = b.addr.rsplit(':').next().unwrap_or(&b.addr);
-    let effect = match b.what.as_str() {
-        "door" => "Antigravity обращается к Google мимо обхода и получает ошибку 400",
-        "dns" => "подмена адресов не работает и запросы к Google идут медленнее",
-        _ => "обход ошибки 400 работает не полностью",
-    };
+    let effect = "DNS-обход не работает";
     // Port 53 held by a service is the one case where the image name is worse
     // than useless: it is `svchost.exe`, which the user cannot act on. What
     // actually holds it is nearly always Internet Connection Sharing, started
@@ -357,7 +271,7 @@ fn blocked(b: &crate::gate::Blocker, exe: &str) -> Headline {
                 format!("Порт {port} занят другой программой"),
                 format!(
                     "Порт {port} на этом компьютере занимает {who}, поэтому {effect}. Закройте её \
-                     или отключите в ней веб-сервер — обход сам займёт порт в течение минуты. \
+                     или отключите в ней DNS-сервер — обход сам займёт порт в течение минуты. \
                      Или нажмите «Починить»."
                 ),
             )
@@ -401,20 +315,14 @@ fn blocked(b: &crate::gate::Blocker, exe: &str) -> Headline {
 fn exe_or_default(exe: &str) -> String {
     if !exe.is_empty() {
         exe.to_string()
-    } else if cfg!(target_os = "windows") {
-        r"C:\ProgramData\AGUnlocker\ag_dns.exe".to_string()
     } else {
-        "~/.local/share/agunlocker/ag_proxy".to_string()
+        r"C:\ProgramData\AGUnlocker\ag_dns.exe".to_string()
     }
 }
 
 /// One blocker as a line of the report: what, where, why.
 pub fn blocker_line(b: &crate::gate::Blocker) -> String {
-    let what = match b.what.as_str() {
-        "door" => "локальные адреса гейт-хостов",
-        "dns" => "DNS-релей",
-        _ => "локальный прокси",
-    };
+    let what = "DNS-релей";
     let why = match b.cause.as_str() {
         "held" if !b.by.is_empty() => format!("порт занят программой «{}»", b.by),
         "held" => "порт занят другой программой".to_string(),
@@ -506,8 +414,8 @@ pub fn headline(f: &Facts) -> Headline {
 
     // The bypass needs an administrator to install and to repair. Asked for
     // only when there is something it would install or repair.
-    let service_broken = f.bypass_on && (!f.relay_running || f.relay_outdated || !f.rules);
-    if !f.admin && (!f.bypass_on || service_broken) {
+    let service_broken = f.bypass_available && f.bypass_on && (!f.relay_running || f.relay_outdated || !f.rules);
+    if f.bypass_available && !f.admin && (!f.bypass_on || service_broken) {
         return Headline {
             tone: Tone::Action,
             title: "Нужны права администратора".into(),
@@ -536,8 +444,8 @@ pub fn headline(f: &Facts) -> Headline {
         };
     }
 
-    if !f.patch_on || !f.bypass_on {
-        let what = match (f.patch_on, f.bypass_on) {
+    if !f.patch_on || (f.bypass_available && !f.bypass_on) {
+        let what = match (f.patch_on, f.bypass_on || !f.bypass_available) {
             (false, false) => "Разблокировка входа и обход ошибки 400 выключены.",
             (false, true) => "Разблокировка входа выключена.",
             _ => "Обход ошибки 400 выключен.",
@@ -570,19 +478,11 @@ pub fn headline(f: &Facts) -> Headline {
         };
     }
 
-    // Something on this machine keeps part of the relay down (P53). Said with
-    // the thing to do about it - the 400 it causes says nothing of the sort.
-    if let Some(b) = &f.proxy_blocked {
+    // A blocked DNS listener names a fixable cause before the generic cut-off verdict.
+    if let Some(b) = f.dns_blocked.as_ref().filter(|_| f.bypass_available) {
         return blocked(b, &f.relay_exe);
     }
-    // The DNS listener is the other half the relay cannot open by itself. Below
-    // the proxy because the proxy carries everything while it is up, and above
-    // "cut off" because a dead `:53` is a named, fixable cause and being cut
-    // off is a guess.
-    if let Some(b) = &f.dns_blocked {
-        return blocked(b, &f.relay_exe);
-    }
-    if f.cut_off {
+    if f.bypass_available && f.cut_off {
         match f.net_ok {
             Some(true) => {
                 return Headline {
@@ -621,20 +521,23 @@ pub fn headline(f: &Facts) -> Headline {
         _ => false,
     };
     if refused_last {
-        // With the door shut, Antigravity's calls go around the bypass: that
-        // is the cause, and «Чиним» would promise a fix the relay cannot make.
-        if let Some(b) = &f.door_blocked {
-            return blocked(b, &f.relay_exe);
-        }
         let (ago, lines) = f.refusal.unwrap_or_default();
-        if ago > FIXING_FOR {
+        if !f.bypass_available {
+            return Headline {
+                tone: Tone::Action,
+                title: "Ошибка 400 в Antigravity".into(),
+                detail: format!("Google отклонил запрос {}. Проверьте подключение Antigravity и настройки VPN; DNS-обход доступен только в Windows.", ago_text(ago)),
+                action: None,
+            };
+        }
+        if ago > REFUSAL_RECENT {
             return Headline {
                 tone: Tone::Wait,
                 title: "Нужна проверка".into(),
                 detail: format!(
                     "Последний раз была ошибка 400 — {}, и после неё модель не отвечала. \
-                     Напишите что-нибудь в Antigravity: если ошибка повторится, обход её поймает \
-                     и сам сменит путь.",
+                     Отправьте сообщение в Antigravity ещё раз; если ошибка повторится, \
+                     проверьте DNS-сервер и настройки VPN.",
                     ago_text(ago)
                 ),
                 action: None,
@@ -645,8 +548,8 @@ pub fn headline(f: &Facts) -> Headline {
                 tone: Tone::Action,
                 title: "Ошибка 400 повторяется".into(),
                 detail: format!(
-                    "Последняя — {}. Обход перебирает пути сам, но ни один пока не сработал. \
-                     Если у вас включён VPN или прокси, попробуйте выключить его или сменить сервер, \
+                    "Последняя — {}. Проверьте выбранный DNS-сервер. \
+                     Если у вас включён VPN, попробуйте сменить сервер \
                      и отправьте сообщение ещё раз.{}",
                     ago_text(ago),
                     super::report::when_stuck()
@@ -654,51 +557,37 @@ pub fn headline(f: &Facts) -> Headline {
                 action: None,
             };
         }
-        let detail = match &f.answered {
-            Some(a) if a.bypassed => format!(
-                "Ошибка 400 — {}. Antigravity обратился к Google мимо обхода; через минуту его \
-                 запросы пойдут через обход. Отправьте сообщение ещё раз — не помогло, \
-                 перезапустите Antigravity.",
-                ago_text(ago)
-            ),
-            Some(a) if !a.acted.is_empty() => format!(
-                "Ошибка 400 — {}. {}. Отправьте сообщение ещё раз.",
-                ago_text(ago),
-                capitalise(&a.acted)
-            ),
-            _ => format!(
-                "Ошибка 400 — {}. Обход её видит и перестраивается. Отправьте сообщение ещё раз.",
-                ago_text(ago)
-            ),
-        };
         return Headline {
-            tone: Tone::Fixing,
-            title: "Чиним".into(),
-            detail,
+            tone: Tone::Action,
+            title: "Ошибка 400 в Antigravity".into(),
+            detail: format!("Google отклонил запрос {}. Проверьте DNS-сервер и настройки VPN. Отправьте сообщение ещё раз.", ago_text(ago)),
             action: None,
         };
     }
 
     if let Some(ago) = f.answer {
-        let route = f
-            .route
-            .as_deref()
-            .filter(|r| !r.is_empty())
-            .map(|r| format!(" · путь: {r}"))
-            .unwrap_or_default();
         return Headline {
             tone: Tone::Ok,
             title: "Работает".into(),
-            detail: format!("Модель ответила {}{route}.", ago_text(ago)),
+            detail: format!("Модель ответила {}.", ago_text(ago)),
             action: None,
         };
     }
 
-    if !f.relay_reporting {
+    if f.bypass_available && !f.relay_reporting {
         return Headline {
             tone: Tone::Wait,
             title: "Служба запускается".into(),
             detail: "Это занимает до минуты. Потом напишите что-нибудь в Antigravity.".into(),
+            action: None,
+        };
+    }
+
+    if !f.bypass_available {
+        return Headline {
+            tone: Tone::Wait,
+            title: "Патч входа включён".into(),
+            detail: "Патч применён к найденным установкам Antigravity. DNS-обход доступен только в Windows.".into(),
             action: None,
         };
     }
@@ -710,14 +599,6 @@ pub fn headline(f: &Facts) -> Headline {
                  ответила."
             .into(),
         action: None,
-    }
-}
-
-fn capitalise(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
-        None => String::new(),
     }
 }
 
@@ -768,6 +649,7 @@ mod tests {
             installs_found: true,
             patch_on: true,
             bypass_on: true,
+            bypass_available: true,
             relay_running: true,
             relay_outdated: false,
             rules: true,
@@ -804,14 +686,10 @@ mod tests {
     fn silence_after_a_refusal_is_not_working() {
         let f = Facts {
             refusal: Some((secs(300), 4)),
-            answered: Some(Answered {
-                acted: "адреса серверов Google подбираются заново".into(),
-                bypassed: false,
-            }),
             ..working()
         };
         let h = headline(&f);
-        assert_eq!(h.tone, Tone::Fixing);
+        assert_eq!(h.tone, Tone::Action);
         assert!(
             h.detail.contains("Отправьте сообщение ещё раз"),
             "{}",
@@ -820,18 +698,16 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_after_the_refusal_is_working_and_says_by_which_path() {
+    fn an_answer_after_the_refusal_is_working() {
         let f = Facts {
             refusal: Some((secs(300), 4)),
             answer: Some(secs(60)),
-            route: Some("встроенный выход".into()),
             ..working()
         };
         let h = headline(&f);
         assert_eq!(h.tone, Tone::Ok);
         assert_eq!(h.title, "Работает");
         assert!(h.detail.contains("1 минуту назад"), "{}", h.detail);
-        assert!(h.detail.contains("встроенный выход"), "{}", h.detail);
     }
 
     /// Found live: an answer, then a refusal, then quiet. Once the refusal is
@@ -863,7 +739,7 @@ mod tests {
             answer: Some(secs(600)),
             ..working()
         };
-        assert_eq!(headline(&f).tone, Tone::Fixing);
+        assert_eq!(headline(&f).tone, Tone::Action);
     }
 
     #[test]
@@ -872,26 +748,6 @@ mod tests {
         assert_eq!(h.tone, Tone::Wait);
         assert!(!h.detail.contains("работает"), "{}", h.detail);
         assert_eq!(h.action, None);
-    }
-
-    #[test]
-    fn a_client_that_went_around_us_is_told_so_and_what_to_do() {
-        let f = Facts {
-            refusal: Some((secs(10), 4)),
-            answered: Some(Answered {
-                acted: String::new(),
-                bypassed: true,
-            }),
-            ..working()
-        };
-        let h = headline(&f);
-        assert_eq!(h.tone, Tone::Fixing);
-        assert!(h.detail.contains("мимо обхода"), "{}", h.detail);
-        assert!(
-            h.detail.contains("перезапустите Antigravity"),
-            "{}",
-            h.detail
-        );
     }
 
     #[test]
@@ -1016,39 +872,23 @@ mod tests {
         assert_eq!(provider_name("1.1.1.1"), "1.1.1.1");
     }
 
-    #[test]
-    fn only_a_note_written_after_the_refusal_answers_it() {
-        assert!(answers(1_000, 1_000));
-        assert!(answers(1_015, 1_000));
-        assert!(answers(998, 1_000));
-        assert!(!answers(940, 1_000));
-        assert!(!answers(0, 1_000));
-        assert!(answers(u64::MAX, 1_000));
-        assert!(!answers(0, u64::MAX));
-    }
-
     fn blocker(what: &str, cause: &str, by: &str) -> crate::gate::Blocker {
         crate::gate::Blocker {
             what: what.into(),
-            addr: if what == "door" {
-                "127.65.71.1:443"
-            } else {
-                "127.0.0.1:53129"
-            }
-            .into(),
+            addr: "127.0.0.53:53".into(),
             cause: cause.into(),
             by: by.into(),
             error: "os error 10013".into(),
         }
     }
 
-    /// P53: a proxy the relay cannot bind is said with the fix, even while the
+    /// A DNS listener the relay cannot bind is said with the fix, even while the
     /// model still answers through what is left of the bypass.
     #[test]
-    fn a_blocked_proxy_says_what_to_add_to_the_antivirus() {
+    fn a_blocked_dns_listener_says_what_to_add_to_the_antivirus() {
         let f = Facts {
             answer: Some(secs(5)),
-            proxy_blocked: Some(blocker("proxy", "denied", "")),
+            dns_blocked: Some(blocker("dns", "denied", "")),
             relay_exe: r"C:\ProgramData\AGUnlocker\ag_dns.exe".into(),
             ..working()
         };
@@ -1060,43 +900,37 @@ mod tests {
             "{}",
             h.detail
         );
-        assert!(h.detail.contains("53129"), "{}", h.detail);
+        assert!(h.detail.contains("53"), "{}", h.detail);
         assert_eq!(h.action, Some(Action::Repair));
     }
 
-    /// The door matters when the 400 is happening: then it is the reason, named
-    /// with the program holding the port. While answers come, it is not news.
     #[test]
-    fn a_shut_door_is_the_reason_for_a_refusal_and_names_who_holds_443() {
-        let door = Some(blocker("door", "held", "vmware-hostd.exe"));
-        let refused = Facts {
-            refusal: Some((secs(20), 4)),
-            door_blocked: door.clone(),
-            ..working()
-        };
-        let h = headline(&refused);
-        assert_eq!(h.tone, Tone::Action);
-        assert_eq!(h.title, "Порт 443 занят другой программой");
-        assert!(h.detail.contains("«vmware-hostd.exe»"), "{}", h.detail);
-        let answering = Facts {
-            answer: Some(secs(5)),
-            refusal: Some((secs(60), 4)),
-            door_blocked: door,
-            ..working()
-        };
-        assert_eq!(headline(&answering).tone, Tone::Ok);
-    }
-
-    #[test]
-    fn a_reserved_port_asks_for_winnat_to_be_restarted() {
+    fn unavailable_dns_does_not_request_a_missing_service() {
         let f = Facts {
-            refusal: Some((secs(20), 4)),
-            door_blocked: Some(blocker("door", "reserved", "")),
+            bypass_available: false,
+            bypass_on: false,
+            relay_running: false,
+            relay_reporting: false,
+            rules: false,
             ..working()
         };
         let h = headline(&f);
-        assert_eq!(h.title, "Windows закрыла порт 443");
-        assert!(h.detail.contains("net stop winnat"), "{}", h.detail);
+        assert_eq!(h.title, "Патч входа включён");
+        assert_eq!(h.action, None);
+        let refused = headline(&Facts { refusal: Some((secs(5), 4)), ..f });
+        assert_eq!(refused.title, "Ошибка 400 в Antigravity");
+        assert_eq!(refused.action, None);
+    }
+
+    #[test]
+    fn a_reserved_dns_port_asks_for_winnat_to_be_restarted() {
+        let f = Facts {
+            dns_blocked: Some(blocker("dns", "reserved", "")),
+            ..working()
+        };
+        let h = headline(&f);
+        assert_eq!(h.title, "Windows закрыла порт 53");
+        assert!(h.detail.contains("net stop winnat"));
     }
 
     /// A relay nothing answers: blocked if this window gets out, offline if it

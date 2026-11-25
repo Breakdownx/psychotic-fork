@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 # Antigravity Unlocker - Linux launcher.
 #
-# Runs as the normal user - NO sudo. The phase-2 region route is entirely
-# unprivileged: the language server that carries the gate lives in
-# ~/.local/share (user-writable), the local proxy is a systemd *user* unit, and
-# AG_LS_PROXY is a user drop-in. That is also what makes "right-click > Run as a
-# Program" work without a password prompt. A system-wide /opt install would need
-# root to patch, but the per-user copy is the one the app actually runs.
+# The GUI and the watchdog use the current user's desktop session and files.
 #
 # Since 2.12.2 the tool IS a window (eframe/egui) - there is no numbered menu any
 # more. So this script no longer reopens itself inside a terminal emulator: that
@@ -48,10 +43,7 @@ say_error() {
 
 # As the user, never through sudo. Root has no key to the user's X/Wayland
 # session («Authorization required, but no authorization protocol specified»),
-# and everything this tool touches - the installs under ~/.local/share, the
-# systemd user unit, ~/.config/environment.d - is the user's: as root it would
-# look for Antigravity in root's home and set the proxy up for root. A server
-# where root *is* the user (no SUDO_USER) is fine.
+# and would search for installs in root's home. A root login without sudo is valid.
 if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
     say_error "Запускайте без sudo: bash launch.sh
 Под root программа не видит ваш рабочий стол и искала бы Antigravity

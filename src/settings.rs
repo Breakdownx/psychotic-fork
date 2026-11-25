@@ -9,12 +9,7 @@
 //! Deliberately best-effort: a missing or corrupt file is a fresh `Settings`,
 //! never an error the user has to deal with.
 //!
-//! Lives in `dns_forwarder::log_dir()`, next to `upstream.txt`, and for the same
-//! reason: the relay task runs **as this user** under an S4U principal, not as
-//! SYSTEM, so per-user state is exactly what both processes can reach. It is
-//! also why the provider deny-list needs no second copy anywhere — one file,
-//! re-read rather than cached, is the pattern `upstream::configured` already
-//! set (src/upstream.rs:286).
+//! The window and the per-user background services share this settings file.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -65,18 +60,12 @@ pub struct Settings {
     #[serde(skip)]
     pub decline_unrecorded: bool,
 
-    /// Switch 2 and its parts. The master switch is not stored separately: it is
-    /// on when any of its parts is, which keeps one truth instead of two.
-    pub dns: bool,
-    pub local_proxy: bool,
+    /// Set only when loading a file written by a version with HTTP proxies.
+    #[serde(skip)]
+    pub has_retired_proxy_settings: bool,
 
-    /// Diagnostics only, set by hand in `settings.json`, never by the window:
-    /// the one route the gate hosts may take (`own`, `exits`, `relay`,
-    /// `direct`, `vpn`), so a measurement can say which path it timed. Empty =
-    /// the normal route table. A named route that is not usable yields no route
-    /// at all rather than quietly measuring another one.
-    #[serde(default)]
-    pub debug_route: String,
+    /// Enables DNS forwarding on Windows.
+    pub dns: bool,
 
     /// Providers the user turned off by name. A deny-list rather than an
     /// allow-list on purpose: a provider added in a later release is then on by
@@ -122,11 +111,6 @@ pub struct Settings {
     #[allow(dead_code)]
     pub verify_tls: bool,
 
-    /// The user's own HTTP proxy ("bring your own exit"). Kept even while off so
-    /// flipping the switch back does not mean typing it again.
-    pub own_proxy: String,
-    pub own_proxy_enabled: bool,
-
     /// Installs the user pointed at by hand, on top of the ones found by the
     /// scan (the pencil next to each path).
     pub manual_paths: Vec<PathBuf>,
@@ -138,23 +122,19 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        // The built-in bypass ships on. Optional proxies need user configuration.
         Self {
             client_patch: false,
             auto_patch: true,
             patch_declined: false,
             decline_unrecorded: false,
+            has_retired_proxy_settings: false,
             dns: true,
-            local_proxy: true,
-            debug_route: String::new(),
             disabled_providers: Vec::new(),
             custom_dns: String::new(),
             rotate_providers: true,
             provider_order: Vec::new(),
             vpn_detect: true,
             verify_tls: true,
-            own_proxy: String::new(),
-            own_proxy_enabled: false,
             manual_paths: Vec::new(),
             theme: ThemeMode::System,
         }
@@ -265,7 +245,10 @@ fn parse(text: &str) -> Option<Settings> {
     let value: serde_json::Value =
         serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
     let unrecorded = value.get("patch_declined").is_none();
+    let retired = ["local_proxy", "own_proxy", "own_proxy_enabled"].iter()
+        .any(|key| value.get(key).is_some());
     let mut s: Settings = serde_json::from_value(value).ok()?;
+    s.has_retired_proxy_settings = retired;
     if unrecorded {
         s.patch_declined = !s.client_patch;
         s.decline_unrecorded = true;
@@ -311,12 +294,7 @@ fn path() -> Option<PathBuf> {
 
 /// The settings as a *serving* process must read them.
 ///
-/// The relay resolves on a hot path — one call per DNS query, one per CONNECT —
-/// so this is cached behind a short TTL rather than read from disk each time.
-/// The TTL is the whole bargain: it lets the window write the file and an
-/// already-running relay pick the change up without a restart, which is exactly
-/// what `upstream.txt` does and why that file is re-read rather than cached
-/// forever (src/upstream.rs:302-308).
+/// The DNS relay caches settings briefly between queries.
 ///
 /// Holds only its own lock and calls into nothing else, so it cannot take part
 /// in the cross-module reentrancy I50 forbids.
@@ -325,7 +303,7 @@ static CACHE: Mutex<Option<(Settings, Instant)>> = Mutex::new(None);
 fn cached() -> Settings {
     // Tests get the defaults, never the machine's file.
     //
-    // `resolvers` and `proxy` ask this question deep inside the pool, so without
+    // Resolvers ask this question deep inside the pool, so without
     // this the pool's own unit tests would depend on whatever the person running
     // them last switched in the window — and the failure looks like a bug in the
     // pool rather than in the harness. Behaviour with real settings is covered
@@ -433,19 +411,6 @@ pub fn manual_paths() -> Vec<PathBuf> {
     cached().manual_paths
 }
 
-/// Whether the user wants the local proxy route at all.
-///
-/// Read by the relay, which restores the proxy variable at every start: without
-/// this it put back a route the window had just switched off.
-pub fn local_proxy_wanted() -> bool {
-    cached().local_proxy
-}
-
-pub fn debug_route() -> String {
-    cached().debug_route.clone()
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,7 +420,7 @@ mod tests {
         // Nothing has been written in a test process, so this exercises the
         // "first run" path that every new user takes.
         let s = Settings::default();
-        assert!(s.dns && s.local_proxy && s.auto_patch);
+        assert!(s.dns && s.auto_patch);
         assert!(s.rotate_providers, "the pool races by default");
         assert!(
             !s.client_patch,
@@ -468,24 +433,24 @@ mod tests {
     }
 
     #[test]
-    fn legacy_group_fields_are_ignored_without_resetting_other_settings() {
-        let s = parse(
-            r#"{
-            "group_key":"old-code", "group_key_at":42, "group_proxy":true,
-            "own_proxy_at":43, "own_proxy":"http://127.0.0.1:8080",
-            "own_proxy_enabled":true, "dns":false, "local_proxy":false,
-            "debug_route":"group", "patch_declined":true
-        }"#,
-        )
-        .expect("old settings still load");
-        assert!(s.own_proxy_enabled);
-        assert_eq!(s.own_proxy, "http://127.0.0.1:8080");
-        assert!(!s.dns && !s.local_proxy);
-        // Removing an unavailable diagnostic pin would allow other routes.
-        assert_eq!(s.debug_route, "group");
-        let json = serde_json::to_value(&s).expect("serializes");
-        for removed in ["group_key", "group_key_at", "group_proxy", "own_proxy_at"] {
-            assert!(json.get(removed).is_none(), "obsolete {removed} was saved");
+    fn retired_proxy_options_are_ignored_without_resetting_the_patch_or_dns() {
+        let s = parse(r#"{
+            "group_key":"legacy", "group_key_at":42, "group_proxy":true,
+            "own_proxy":"http://127.0.0.1:8080", "own_proxy_at":43, "own_proxy_enabled":true,
+            "local_proxy":true, "debug_route":"own", "dns":false,
+            "client_patch":true, "auto_patch":true, "patch_declined":false, "theme":"dark"
+        }"#).expect("old settings still load");
+        assert!(s.has_retired_proxy_settings);
+        assert!(s.client_patch && s.auto_patch_wanted());
+        assert!(!s.dns);
+        assert_eq!(s.theme, ThemeMode::Dark);
+        let saved = serde_json::to_value(&s).expect("serializes");
+        assert!(!parse(&saved.to_string()).unwrap().has_retired_proxy_settings);
+        for field in [
+            "group_key", "group_key_at", "group_proxy", "own_proxy_at", "own_proxy",
+            "own_proxy_enabled", "local_proxy", "debug_route",
+        ] {
+            assert!(saved.get(field).is_none(), "obsolete {field} was saved");
         }
     }
 
@@ -584,7 +549,7 @@ mod tests {
         let json = r#"{"dns": false, "something_from_the_future": 7}"#;
         let s: Settings = serde_json::from_str(json).expect("unknown fields are ignored");
         assert!(!s.dns);
-        assert!(s.local_proxy, "fields left out keep their default");
+        assert!(s.auto_patch, "fields left out keep their default");
         assert_eq!(s.theme, ThemeMode::System);
     }
 

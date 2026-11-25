@@ -123,7 +123,6 @@ impl App {
                 Event::Log(level, line) => self.log.push(level, line),
                 Event::Status(status) => self.status = Some(*status),
                 Event::Busy(what) => self.busy = what,
-                Event::ProxySaved(..) => {}
                 Event::Deactivated => {
                     self.busy = None;
                     self.screen = Screen::Deactivated;

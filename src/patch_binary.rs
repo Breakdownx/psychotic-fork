@@ -53,20 +53,8 @@ impl Drop for PatchLock {
     }
 }
 
-// Two edits are made to the native binaries, both same-length renames of a
-// string literal. Same length means offsets, relocations and the PE layout are
-// untouched, and the revert is byte-exact.
-//
-// 1. The protobuf field name `ineligible` (and `ineligible_tiers`) becomes a
-//    same-length nonsense word. Both the descriptor and the matching Go struct
-//    tag are rewritten, so they stay consistent; the JSON the client receives no
-//    longer carries the field it gates on. This one is the patch - without it
-//    nothing works, so a build where it does not match is a failure.
-//
-// 2. The environment variable the language server reads its proxy from is
-//    renamed to a private name (`PROXY_VAR_*` below). This one is additive: a
-//    build where it does not match still unlocks, it just has no local-proxy
-//    route, so it is counted and reported, never fatal.
+// The client patch preserves the file layout. Older versions also renamed
+// the proxy environment variable. That rename is only used during rollback.
 //
 // The literals live inside obfstr! blocks so they don't show up as plain
 // strings in this binary.
@@ -476,65 +464,8 @@ pub fn unpatch_binary(bin_path: &Path) -> Result<usize, String> {
     rewrite(bin_path, &new_bytes, &old_bytes)
 }
 
-/// The name the patched language server reads its proxy URL from, in place of
-/// the standard lower-case `https_proxy`.
-///
-/// **Why this exists.** The local gate proxy is only useful if the language
-/// server points at it, and the only channel a Go program offers is a proxy
-/// variable in its environment. Nothing spawns the server for us - the IDE and
-/// the Desktop shell do - so up to `2.11.0_4` the tool wrote `HTTPS_PROXY` into
-/// the *user* environment, and every program on the machine that honours it
-/// went through `127.0.0.1:53129` as well: shells, git, npm, package managers.
-/// That breadth is what D14 accepted as a cost and what the owner rejected on
-/// 2026-09-07 ("мешает в системе"). It is also what made a dead listener a
-/// machine-wide outage (G20, G31) rather than an Antigravity one.
-///
-/// **Why a rename is the whole fix.** `golang.org/x/net/http/httpproxy` reads
-/// `getEnvAny("HTTPS_PROXY", "https_proxy")` - two literals, both present in the
-/// binary, and the language server carries a second copy of the pair in its own
-/// code. Renaming the **lower-case** one hands this tool a channel that nothing
-/// else on the machine reads. Windows environment lookups are case-insensitive
-/// (`GetEnvironmentVariable`), so the upper-case literal still answers for either
-/// spelling and a user's own `HTTPS_PROXY` keeps working untouched.
-///
-/// **Measured, not assumed** (`tools/proxyvar_probe.py`, 2026-09-07, LS 1.11.0).
-/// The server logs the proxy it dialled per request, so all five runs are read
-/// off `cloudcode-pa.googleapis.com` itself rather than off whichever telemetry
-/// client happened to fire first:
-///
-/// | binary  | variables set              | gate host went via |
-/// |---------|----------------------------|--------------------|
-/// | stock   | `HTTPS_PROXY`              | that proxy         |
-/// | stock   | `AG_LS_PROXY`              | direct - inert     |
-/// | patched | `AG_LS_PROXY`              | **ours**           |
-/// | patched | `HTTPS_PROXY`              | theirs - unbroken  |
-/// | patched | both                       | **ours**           |
-///
-/// The last row corrects the reasoning this was built on. The order in
-/// `getEnvAny` suggested `HTTPS_PROXY` would win when both are set; it does not,
-/// because the copy that actually resolves the gate client's proxy consults the
-/// lower-case name first. So the rename does not merely add a channel, it takes
-/// **precedence** over a proxy the user set. That makes `foreign_proxy` load
-/// bearing rather than cosmetic: `reconcile_gate_proxy` and `ensure_proxy_env`
-/// must remove ours whenever one of theirs appears, and both do.
-///
-/// On Linux, where the environment is case-sensitive, a user who sets *only* the
-/// lower-case `https_proxy` loses it inside the language server. That is the one
-/// accepted regression.
-///
-/// Same length as the name it replaces, so this is the same class of edit as the
-/// eligibility rename: no relocation moves, no size change, byte-exact revert.
+/// Private environment name written by older releases, retained for cleanup.
 pub const PROXY_VAR_NEW: &str = "AG_LS_PROXY";
-
-/// Points the language server's proxy lookup at [`PROXY_VAR_NEW`].
-///
-/// Additive, so unlike `patch_binary` a miss is not fatal - `Ok(0)` when the
-/// binary is already renamed, `Err` only when neither name is present, which
-/// callers report rather than treat as a failed patch.
-pub fn patch_proxy_var(bin_path: &Path) -> Result<usize, String> {
-    let old_bytes = proxy_var_original();
-    rewrite(bin_path, &old_bytes, PROXY_VAR_NEW.as_bytes())
-}
 
 /// Puts the standard name back.
 pub fn unpatch_proxy_var(bin_path: &Path) -> Result<usize, String> {
@@ -593,33 +524,14 @@ fn repatch_with(bin_path: &Path, kill_locked: bool) -> RepatchOutcome {
         Err(e) => return RepatchOutcome::Failed(e),
     };
     let (from, to) = field_signatures();
-    let proxy_from = proxy_var_original();
     let mut data = match fs::read(bin_path) {
         Ok(d) => d,
         Err(e) => return RepatchOutcome::Failed(e.to_string()),
     };
     let replaced = replace_all(&mut data, &from, &to);
-    // Both renames ride in one read and one write. An update restores both at
-    // once, and a machine upgrading from a build that only knew the first one
-    // gets the second here without a second pass over 150 MB.
-    let proxy = replace_all(&mut data, &proxy_from, PROXY_VAR_NEW.as_bytes());
     if replaced == 0 {
         if count_occurrences(&data, &to) == 0 {
             return RepatchOutcome::SignatureMissing;
-        }
-        // The patch is in place; only the proxy channel was missing. Write for
-        // that alone, but report what the watchdog cares about: nothing about
-        // the unlock itself changed.
-        //
-        // `write_atomic`, deliberately not `write_binary`: the latter answers a
-        // locked file by killing whatever holds it, and this edit is additive -
-        // the server is unlocked and working, it just has no local-proxy route
-        // yet. Killing a running language server mid-session for that is a worse
-        // outcome than waiting; the file settles and the next poll retries.
-        if proxy > 0 {
-            if let Err(e) = write_atomic(bin_path, &data) {
-                return RepatchOutcome::Deferred(e.to_string());
-            }
         }
         return RepatchOutcome::AlreadyPatched;
     }
@@ -789,23 +701,6 @@ pub struct BinarySummary {
     pub failed: usize,
     /// The last failure, so the caller can name it without this module printing.
     pub last_error: Option<String>,
-    /// Binaries that now read the private proxy variable ([`PROXY_VAR_NEW`]).
-    ///
-    /// Tracked separately because it is the precondition for writing that
-    /// variable at all: a build whose proxy literal this patcher does not
-    /// recognise would otherwise get a variable no process ever reads, and the
-    /// local-proxy route would be silently dead rather than reported.
-    pub proxy_var: usize,
-    /// True when a proxy-var rename failed for a reason that is **not** "the
-    /// literal is not in this build".
-    ///
-    /// The two need telling apart because they need opposite advice. A missing
-    /// literal means a new Antigravity this patcher does not understand: the
-    /// user needs a newer unlocker. A locked file - antivirus holding
-    /// `language_server.exe`, a denied write - means "close Antigravity and run
-    /// it again". Reporting the second as the first sends the user looking for
-    /// an update that does not exist.
-    pub proxy_var_retryable: bool,
 }
 
 impl BinarySummary {
@@ -819,8 +714,6 @@ pub fn patch_all_binaries(inst: &Path) -> BinarySummary {
         ok: 0,
         failed: 0,
         last_error: None,
-        proxy_var: 0,
-        proxy_var_retryable: false,
     };
     for bin in binary_targets(inst) {
         let label = bin
@@ -838,17 +731,6 @@ pub fn patch_all_binaries(inst: &Path) -> BinarySummary {
                 summary.failed += 1;
                 summary.last_error = Some(format!("{}: {}", label, e));
             }
-        }
-        // Additive and separately judged: a binary whose proxy literal is not
-        // where this build expects it is still unlocked, so it never touches
-        // `failed`. `Ok(0)` is "already renamed", which counts as carrying it.
-        match patch_proxy_var(&bin) {
-            Ok(_) => summary.proxy_var += 1,
-            // `rewrite` says "Сигнатура не найдена" for a literal that is not
-            // there and anything else for an I/O problem. Only the second is
-            // worth telling the user to retry.
-            Err(e) if !e.contains("Сигнатура") => summary.proxy_var_retryable = true,
-            Err(_) => {}
         }
     }
     summary
@@ -1037,13 +919,13 @@ mod tests {
         );
         worker.join().unwrap();
         assert_eq!(repatch_before_launch(&path), RepatchOutcome::AlreadyPatched);
-        assert_eq!(fs::read(&path).unwrap(), b"..inexigible..AG_LS_PROXY..");
+        assert_eq!(fs::read(&path).unwrap(), b"..inexigible..https_proxy..");
         fs::remove_file(path).unwrap();
     }
 
     #[cfg(windows)]
     #[test]
-    fn a_locked_proxy_only_edit_is_deferred_and_retried() {
+    fn a_locked_patched_client_keeps_its_standard_proxy_name() {
         use std::os::windows::fs::OpenOptionsExt;
         let path =
             std::env::temp_dir().join(format!("ag_proxy_deferred_{}.bin", std::process::id()));
@@ -1053,21 +935,18 @@ mod tests {
             .share_mode(1)
             .open(&path)
             .unwrap();
-        assert!(matches!(
-            repatch_if_needed(&path),
-            RepatchOutcome::Deferred(_)
-        ));
+        assert_eq!(repatch_if_needed(&path), RepatchOutcome::AlreadyPatched);
         assert_eq!(fs::read(&path).unwrap(), b"..inexigible..https_proxy..");
         drop(reader);
         assert_eq!(repatch_if_needed(&path), RepatchOutcome::AlreadyPatched);
-        assert_eq!(fs::read(&path).unwrap(), b"..inexigible..AG_LS_PROXY..");
+        assert_eq!(fs::read(&path).unwrap(), b"..inexigible..https_proxy..");
         fs::remove_file(path).unwrap();
     }
 
     /// What this machine's installs look like right now, read-only.
     ///
-    /// The one question a new Antigravity release asks: are both renames still
-    /// there to make? `SignatureMissing` on a fresh install means the proto
+    /// The one question a new Antigravity release asks: is the client signature still
+    /// present? `SignatureMissing` on a fresh install means the proto
     /// field moved and the patcher needs a new signature before the version is
     /// shipped (kb/patch.md); `Unpatched` means it is simply not applied yet.
     /// Reads and prints, asserts nothing about the answer - all four states are
@@ -1086,21 +965,9 @@ mod tests {
                 install.display()
             );
             for (path, state) in inspect_install(install).files {
-                // The second rename is not part of `FileState` (it is not what
-                // decides eligibility), and it is the half a new build is just
-                // as free to move. Read straight off the bytes.
-                let bytes = fs::read(&path).unwrap_or_default();
-                let proxy = if contains_subslice(&bytes, PROXY_VAR_NEW.as_bytes()) {
-                    "AG_LS_PROXY"
-                } else if contains_subslice(&bytes, &proxy_var_original()) {
-                    "не переименован"
-                } else {
-                    "ЛИТЕРАЛА НЕТ"
-                };
                 println!(
-                    "  {:?}  прокси-переменная: {}  — {}",
+                    "  {:?} — {}",
                     state,
-                    proxy,
                     path.file_name().unwrap_or_default().to_string_lossy()
                 );
             }
@@ -1210,122 +1077,34 @@ mod tests {
         assert_eq!(count_occurrences(&after, b"ineligible"), 0);
         assert_eq!(count_occurrences(&after, b"inexigible"), patched);
 
-        // The proxy channel, on the real Go binary: the lower-case literal that
-        // `httpproxy.getEnvAny` reads second is renamed, the upper-case one it
-        // reads first is left for the user, and nothing else moves.
-        let proxied = patch_proxy_var(&tmp).expect("proxy literal found");
-        assert!(proxied > 0, "no proxy literal replaced");
-        let after = fs::read(&tmp).expect("read patched");
-        assert_eq!(after.len(), original.len(), "proxy rename changed the size");
-        assert_eq!(count_occurrences(&after, b"https_proxy"), 0);
-        assert_eq!(
-            count_occurrences(&after, b"HTTPS_PROXY"),
-            count_occurrences(&original, b"HTTPS_PROXY"),
-            "the user's own variable name must be untouched"
-        );
-
         // Re-running must be a no-op, not an error.
         assert_eq!(patch_binary(Path::new(""), &tmp).expect("idempotent"), 0);
-        assert_eq!(patch_proxy_var(&tmp).expect("idempotent"), 0);
 
-        assert_eq!(unpatch_proxy_var(&tmp).expect("revert proxy"), proxied);
         assert_eq!(unpatch_binary(&tmp).expect("revert"), patched);
         assert_eq!(fs::read(&tmp).expect("read reverted"), original);
 
         let _ = fs::remove_file(&tmp);
     }
 
-    /// The whole edit rests on the two names being the same length: a byte
-    /// longer and every offset after it in a 150 MB PE moves. Cheap to assert,
-    /// impossible to notice by eye when someone renames the variable.
     #[test]
-    fn the_private_proxy_name_is_the_same_length_as_the_one_it_replaces() {
-        assert_eq!(PROXY_VAR_NEW.len(), "https_proxy".len());
-        // Upper-case `HTTPS_PROXY` stays untouched on purpose: it is looked up
-        // first, so a proxy the user set themselves still wins (I54). The name
-        // the tool writes is this same constant by definition
-        // (`endpoint::PROXY_ENV_VAR`), so the two cannot drift apart.
-        assert_ne!(PROXY_VAR_NEW, "HTTPS_PROXY");
-        assert_ne!(PROXY_VAR_NEW, crate::endpoint::LEGACY_PROXY_ENV_VAR);
-    }
-
-    /// Both renames on one buffer, and back. The proxy rename must not disturb
-    /// the eligibility one, and the revert must be byte-exact - the file is a
-    /// signed-by-nobody 150 MB executable and a stray byte is unlaunchable.
-    #[test]
-    fn the_proxy_rename_round_trips_beside_the_eligibility_one() {
-        let dir = std::env::temp_dir().join("ag_proxyvar_test");
-        fs::create_dir_all(&dir).expect("temp dir");
-        let bin = dir.join("both.bin");
-        let original = b"..ineligible..https_proxy..HTTPS_PROXY..https_proxy..".to_vec();
-        fs::write(&bin, &original).unwrap();
-
-        assert_eq!(patch_binary(Path::new(""), &bin).expect("gate"), 1);
-        assert_eq!(patch_proxy_var(&bin).expect("proxy var"), 2);
-        let after = fs::read(&bin).unwrap();
-        assert_eq!(after.len(), original.len(), "size changed");
-        assert_eq!(count_occurrences(&after, b"https_proxy"), 0);
-        assert_eq!(
-            count_occurrences(&after, b"HTTPS_PROXY"),
-            1,
-            "the user's own variable name must survive"
-        );
-        // Re-running either one is a no-op, not an error.
-        assert_eq!(patch_proxy_var(&bin).expect("idempotent"), 0);
-
-        assert_eq!(unpatch_proxy_var(&bin).expect("revert proxy"), 2);
-        assert_eq!(unpatch_binary(&bin).expect("revert gate"), 1);
-        assert_eq!(fs::read(&bin).unwrap(), original);
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// A build whose proxy literal is missing is not a failed patch: the unlock
-    /// still applies, only the local-proxy route is unavailable, and the caller
-    /// has to be able to tell those apart to avoid writing a dead variable.
-    #[test]
-    fn a_missing_proxy_literal_is_an_error_not_a_silent_success() {
-        let dir = std::env::temp_dir().join("ag_proxyvar_missing_test");
-        fs::create_dir_all(&dir).expect("temp dir");
-        let bin = dir.join("gate_only.bin");
-        fs::write(&bin, b"..ineligible..").unwrap();
-
-        assert!(patch_binary(Path::new(""), &bin).is_ok());
-        assert!(patch_proxy_var(&bin).is_err());
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The watchdog's job after an update that restored both names, and after an
-    /// upgrade from a build that only knew the eligibility one.
-    #[test]
-    fn repatch_restores_the_proxy_name_too() {
-        let dir = std::env::temp_dir().join("ag_repatch_proxy_test");
-        fs::create_dir_all(&dir).expect("temp dir");
-
-        // An update put the stock binary back: both names are stock again.
-        let updated = dir.join("updated.bin");
-        fs::write(&updated, b"..ineligible..https_proxy..").unwrap();
-        assert_eq!(repatch_if_needed(&updated), RepatchOutcome::Repatched(1));
-        assert_eq!(
-            count_occurrences(&fs::read(&updated).unwrap(), b"https_proxy"),
-            0
-        );
-
-        // Patched by <= 2.11.0_4: unlocked, but on the stock proxy channel. The
-        // unlock is unchanged, so the outcome stays `AlreadyPatched`, and the
-        // proxy name is fixed up in the same pass.
-        let legacy = dir.join("legacy.bin");
-        fs::write(&legacy, b"..inexigible..https_proxy..").unwrap();
-        assert_eq!(repatch_if_needed(&legacy), RepatchOutcome::AlreadyPatched);
-        let after = fs::read(&legacy).unwrap();
-        assert_eq!(count_occurrences(&after, b"https_proxy"), 0);
-        assert_eq!(count_occurrences(&after, PROXY_VAR_NEW.as_bytes()), 1);
-        // And a second pass writes nothing more.
-        assert_eq!(repatch_if_needed(&legacy), RepatchOutcome::AlreadyPatched);
-        assert_eq!(fs::read(&legacy).unwrap(), after);
-
-        fs::remove_dir_all(&dir).ok();
+    fn patch_and_watchdog_leave_proxy_variables_alone() {
+        let root = std::env::temp_dir().join(format!("ag_keep_proxy_names_{}", std::process::id()));
+        let dir = root.join("resources/bin");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(if cfg!(windows) { "language_server.exe" } else { "language_server" });
+        let (original, patched) = field_signatures();
+        for names in [b"https_proxy HTTPS_PROXY".as_slice(), PROXY_VAR_NEW.as_bytes()] {
+            let source = [original.as_slice(), names].concat();
+            let expected = [patched.as_slice(), names].concat();
+            fs::write(&path, &source).unwrap();
+            assert_eq!(patch_all_binaries(&root).ok, 1);
+            assert_eq!(fs::read(&path).unwrap(), expected);
+            fs::write(&path, &source).unwrap();
+            assert!(matches!(repatch_if_needed(&path), RepatchOutcome::Repatched(_)));
+            assert_eq!(repatch_if_needed(&path), RepatchOutcome::AlreadyPatched);
+            assert_eq!(fs::read(&path).unwrap(), expected);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// A temp a killed writer left behind goes on the next write; one young

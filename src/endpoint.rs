@@ -40,16 +40,6 @@ pub const IDE_SETTING: &str = "jetski.cloudCodeUrl";
 /// Environment variable the CLI reads for the same purpose.
 pub const CLI_ENV_VAR: &str = "CLOUD_CODE_URL";
 
-/// What a run did, so the caller can say it out loud rather than change the
-/// user's configuration silently.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Outcome {
-    /// The setting was written or corrected.
-    Applied,
-    /// Already pointing at the right host.
-    AlreadySet,
-}
-
 /// Where the IDE keeps its user settings.
 ///
 /// Derived from `product.json` rather than hardcoded: the folder is named after
@@ -217,46 +207,9 @@ pub const NODE_CA_ENV_VAR: &str = "NODE_EXTRA_CA_CERTS";
 /// only ever saw it because the variable was user-wide.
 const NO_PROXY_VALUE: &str = "127.0.0.1,localhost,::1";
 
-/// Points the patched language server at the local proxy.
-///
-/// Still a user-wide variable - the language server is launched by the IDE, not
-/// by us, so there is no parent process to inject an environment into, and
-/// Windows has no per-image environment. What changed in `2.11.0_5` is the
-/// *name*: `PROXY_ENV_VAR` is read by nothing but the binaries this tool has
-/// patched, so the breadth that used to be the cost of the design is gone. A
-/// leftover from the old scheme is taken off in the same step, since a machine
-/// upgrading passes through here and through no undo path.
-#[cfg(target_os = "windows")]
-pub fn apply_proxy(url: &str, ca_path: &str) -> Result<Outcome, String> {
-    let migrated = remove_legacy_proxy_env(url).unwrap_or(false);
-    if current_env(PROXY_ENV_VAR).as_deref() == Some(url) {
-        return Ok(if migrated {
-            Outcome::Applied
-        } else {
-            Outcome::AlreadySet
-        });
-    }
-    set_env(PROXY_ENV_VAR, Some(url))?;
-    // The relay route terminates no TLS and installs no CA, so it needs no
-    // `NODE_EXTRA_CA_CERTS`; only the legacy carrier route passes a real path.
-    if !ca_path.is_empty() {
-        set_env(NODE_CA_ENV_VAR, Some(ca_path))?;
-    }
-    Ok(Outcome::Applied)
-}
-
-/// Takes the user-wide `HTTPS_PROXY`/`NO_PROXY` of builds up to `2.11.0_4` back
-/// off, and only when the values are the ones this tool wrote.
-///
-/// This is the migration that has to happen on *every* path a machine can take
-/// out of an old build: menu 1 (via `apply_proxy`), the relay's
-/// `ensure_proxy_env`, and both undo paths. Skipping it would leave the exact
-/// state the owner asked to be rid of - and, worse, one naming a port that the
-/// new scheme still binds, so it would keep silently working and nobody would
-/// notice the whole machine was still routed through loopback.
-///
-/// `Ok(true)` when something came off. A value that is not ours is never
-/// touched: `HTTPS_PROXY` is also where a user's own proxy lives (I45).
+/// Removes the HTTPS_PROXY/NO_PROXY values written by old builds.
+/// Standard proxy variables are removed only when their values identify ours.
+/// Returns whether anything was removed; user-owned values are preserved.
 #[cfg(target_os = "windows")]
 pub fn remove_legacy_proxy_env(url: &str) -> Result<bool, String> {
     let (drop_proxy, drop_no_proxy) = legacy_removals(
@@ -268,13 +221,13 @@ pub fn remove_legacy_proxy_env(url: &str) -> Result<bool, String> {
     let mut trouble: Vec<String> = Vec::new();
 
     if drop_proxy {
-        match set_env(LEGACY_PROXY_ENV_VAR, None) {
+        match clear_env(LEGACY_PROXY_ENV_VAR) {
             Ok(()) => removed = true,
             Err(e) => trouble.push(e),
         }
     }
     if drop_no_proxy {
-        match set_env(NO_PROXY_ENV_VAR, None) {
+        match clear_env(NO_PROXY_ENV_VAR) {
             Ok(()) => removed = true,
             Err(e) => trouble.push(e),
         }
@@ -304,15 +257,7 @@ fn legacy_removals(https: Option<&str>, no_proxy: Option<&str>, url: &str) -> (b
     (drop_proxy, drop_proxy && no_proxy == Some(NO_PROXY_VALUE))
 }
 
-/// Linux keeps the persistent half in the drop-in file, which `apply_proxy`
-/// rewrites in place - so upgrading drops the old names from the next session by
-/// itself. What survives is the *running* user manager, which an older build
-/// filled with `systemctl --user set-environment`, and which would otherwise keep
-/// the whole session pointed at loopback until the user logs out.
-///
-/// Value-scoped, unlike the blanket unset `remove_proxy` does: this runs on the
-/// patch path, where a `https_proxy` the user exported for themselves is none of
-/// our business.
+/// Removes value-matched legacy proxy variables from the running user manager.
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 pub fn remove_legacy_proxy_env(url: &str) -> Result<bool, String> {
     use std::process::Command;
@@ -364,71 +309,8 @@ pub fn remove_legacy_proxy_env(url: &str) -> Result<bool, String> {
     Ok(removed)
 }
 
-/// The Linux path uses **two** mechanisms so the language server the IDE spawns
-/// sees the proxy: a `~/.config/environment.d` drop-in makes it survive a reboot,
-/// and `systemctl --user set-environment` sets it in the running user manager, so
-/// a freshly-launched app inherits it **without a full re-login** - the user only
-/// has to quit and reopen Antigravity.
-///
-/// Both carry `PROXY_ENV_VAR` and nothing else now. The drop-in used to export
-/// `HTTPS_PROXY`/`https_proxy`/`NO_PROXY`/`no_proxy`, which is session-wide on
-/// Linux exactly as the User environment is machine-wide on Windows - every
-/// shell, every `curl`, every package manager through `127.0.0.1:53129`. The
-/// private name reaches the patched binaries and nothing else; rewriting the
-/// file in place is also what retires the old names on an upgrade.
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-pub fn apply_proxy(url: &str, _ca_path: &str) -> Result<Outcome, String> {
-    use std::process::Command;
-    let path = environment_d_path()?;
-    let body = format!(
-        "# Antigravity Unlocker — гейт-хосты через локальный прокси. Переменную\n\
-         # читает только пропатченный language server. Удалите файл, чтобы\n\
-         # отключить.\n\
-         {k}={u}\n",
-        k = PROXY_ENV_VAR,
-        u = url,
-    );
-    let already = fs::read_to_string(&path).ok().as_deref() == Some(body.as_str());
-    let migrated = remove_legacy_proxy_env(url).unwrap_or(false);
-    // `environment.d` is read only by the systemd *user manager*. A session that
-    // lightdm/xfce4-session starts (Linux Mint XFCE) and a terminal or `agy`
-    // launched from it never see it, so the patched CLI stayed on the direct
-    // route and kept its 400 (P51). The shells source the same file.
-    let hooked = ensure_shell_hooks(&path);
-    if already && !migrated && !hooked {
-        return Ok(Outcome::AlreadySet);
-    }
-    if !already {
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).map_err(|e| format!("не создать {}: {}", dir.display(), e))?;
-        }
-        fs::write(&path, &body).map_err(|e| format!("не записать {}: {}", path.display(), e))?;
-    }
-    // Immediate effect for newly-launched apps in this session (best-effort).
-    Command::new("systemctl")
-        .args([
-            "--user",
-            "set-environment",
-            &format!("{}={}", PROXY_ENV_VAR, url),
-        ])
-        .status()
-        .ok();
-    Ok(Outcome::Applied)
-}
-
 const SHELL_BEGIN: &str = "# >>> ag-unlocker >>>";
 const SHELL_END: &str = "# <<< ag-unlocker <<<";
-
-/// The block put into a shell startup file: it sources the same `KEY=value`
-/// drop-in `environment.d` reads, so the port lives in one place and the block
-/// itself never changes. A missing file (after a revert) makes it a no-op.
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn shell_block(conf: &Path) -> String {
-    format!(
-        "{SHELL_BEGIN}\n[ -r '{p}' ] && {{ set -a; . '{p}'; set +a; }}\n{SHELL_END}\n",
-        p = conf.display()
-    )
-}
 
 /// `text` with our block replaced by `block` (or removed when `block` is None).
 /// Returns None when nothing would change.
@@ -464,27 +346,6 @@ fn rewrite_shell_block(text: &str, block: Option<&str>) -> Option<String> {
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 fn shell_files(home: &Path) -> [(PathBuf, bool); 2] {
     [(home.join(".profile"), true), (home.join(".bashrc"), false)]
-}
-
-/// True when any file was changed.
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn ensure_shell_hooks(conf: &Path) -> bool {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return false;
-    };
-    let block = shell_block(conf);
-    let mut changed = false;
-    for (file, create) in shell_files(&home) {
-        let text = match fs::read_to_string(&file) {
-            Ok(t) => t,
-            Err(_) if create && !file.exists() => String::new(),
-            Err(_) => continue,
-        };
-        if let Some(new) = rewrite_shell_block(&text, Some(&block)) {
-            changed |= fs::write(&file, new).is_ok();
-        }
-    }
-    changed
 }
 
 /// Takes our block back out of the shell files (revert).
@@ -529,7 +390,7 @@ pub fn remove_proxy(url: &str, ca_path: &str) -> Result<(), String> {
     // names. That matters for the day the listener moves off 53129 (P26) - a
     // value-scoped removal would leave the old one behind forever.
     if current_env(PROXY_ENV_VAR).is_some() {
-        if let Err(e) = set_env(PROXY_ENV_VAR, None) {
+        if let Err(e) = clear_env(PROXY_ENV_VAR) {
             trouble.push(e);
         }
     }
@@ -587,15 +448,6 @@ pub fn remove_proxy(url: &str, _ca_path: &str) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 pub fn remove_legacy_proxy_env(_url: &str) -> Result<bool, String> {
     Ok(false)
-}
-
-#[cfg(target_os = "macos")]
-pub fn apply_proxy(url: &str, _ca_path: &str) -> Result<Outcome, String> {
-    if crate::macos::persist_env(PROXY_ENV_VAR, url)? {
-        Ok(Outcome::Applied)
-    } else {
-        Ok(Outcome::AlreadySet)
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -806,41 +658,6 @@ fn profile_root() -> Option<PathBuf> {
     }
 }
 
-/// Puts the proxy variable back on our listener when it has gone missing and
-/// nothing of the user's has taken its place. The relay calls this at start: the
-/// watchdog takes the variable off when the listener is dead for a while, and
-/// this is the other half - the listener is back, so the route is too. A variable
-/// already pointing here, or a proxy the user set themselves, is left exactly as
-/// it is.
-///
-/// It also runs the legacy migration on a machine that never opens menu 1 again:
-/// `apply_proxy` does that, and this is the only other caller of it. Without that
-/// an upgraded machine that just reboots would keep its user-wide `HTTPS_PROXY`
-/// indefinitely.
-///
-/// **The foreign check comes first, and that order is load bearing.** The patched
-/// server prefers our variable over the user's `HTTPS_PROXY` when both are set
-/// (measured - see `patch_binary::PROXY_VAR_NEW`), so a user who configures a
-/// proxy *after* being patched would silently keep going through ours. Menu 1
-/// catches that only if they run it again; this runs at every relay start, which
-/// is every boot, so at worst they are back on their own proxy after a restart.
-pub fn ensure_proxy_env(ours: &str) -> Result<Outcome, String> {
-    if foreign_proxy(ours).is_some() {
-        // Theirs, not ours - and ours would win over it, so it has to go.
-        remove_proxy(ours, "")?;
-        return Ok(Outcome::AlreadySet);
-    }
-    if current_env(PROXY_ENV_VAR).is_some_and(|v| is_our_proxy_value(&v, ours)) {
-        // Still ours and still current - but an old user-wide pair may be sitting
-        // beside it, and this path is the one a rebooted machine takes.
-        return match remove_legacy_proxy_env(ours) {
-            Ok(true) => Ok(Outcome::Applied),
-            _ => Ok(Outcome::AlreadySet),
-        };
-    }
-    apply_proxy(ours, "")
-}
-
 /// Takes our proxy variable off. `Ok(true)` when there was one and it was
 /// removed, `Ok(false)` when there was nothing of ours.
 ///
@@ -904,49 +721,26 @@ fn is_our_proxy_value(value: &str, url: &str) -> bool {
 /// Drops `NODE_EXTRA_CA_CERTS` if it still holds `ca_path`, leaving a value the
 /// user set themselves alone.
 ///
-/// Separate from `remove_proxy` because an *upgrade* has to drop the old CA
-/// without turning the proxy off: a machine coming from the carrier route
-/// (<= 2.9.1_27) already has `HTTPS_PROXY` pointing here, so `apply_proxy`
-/// returns `AlreadySet` and never reaches this. Leaving it behind would keep
-/// every Node process on the machine trusting a CA nothing uses any more -
-/// harmless today, and exactly the kind of leftover that is impossible to
-/// explain a year from now.
+/// This also supports cleanup of older builds that installed a local CA.
 pub fn clear_node_ca(ca_path: &str) -> Result<(), String> {
     if current_env(NODE_CA_ENV_VAR).as_deref() == Some(ca_path) {
-        set_env(NODE_CA_ENV_VAR, None)?;
+        clear_env(NODE_CA_ENV_VAR)?;
     }
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn set_env(name: &str, value: Option<&str>) -> Result<(), String> {
-    let literal = match value {
-        Some(v) => format!("'{}'", v),
-        None => "$null".to_string(),
-    };
+fn clear_env(name: &str) -> Result<(), String> {
     let script = format!(
-        "[Environment]::SetEnvironmentVariable('{}',{},'User')",
-        name, literal
+        "[Environment]::SetEnvironmentVariable('{}',$null,'User')", name
     );
-    powershell(&script).ok_or_else(|| format!("не удалось записать {}", name))?;
+    powershell(&script).ok_or_else(|| format!("не удалось удалить {}", name))?;
     Ok(())
 }
 
-/// Persisting a per-user environment variable for GUI-launched processes on
-/// Linux has no single mechanism (systemd `environment.d`, `~/.profile`,
-/// `~/.pam_environment` all reach different launchers), so it is deferred with
-/// the proxy carrier that needs it. Removal is a trivial success - there is
-/// nothing of ours in a persistent store to take out - while a request to *set*
-/// one is refused honestly rather than silently doing nothing.
 #[cfg(not(target_os = "windows"))]
-fn set_env(name: &str, value: Option<&str>) -> Result<(), String> {
-    match value {
-        None => Ok(()),
-        Some(_) => Err(format!(
-            "{} на Linux пока не задаётся (нужен свой прокси-слой порта)",
-            name
-        )),
-    }
+fn clear_env(_name: &str) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]

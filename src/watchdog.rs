@@ -109,7 +109,6 @@ fn run() {
     let mut states: HashMap<PathBuf, FileState> = HashMap::new();
     let mut installs = discover();
     let mut cycles: u32 = 0;
-    let mut listener = ListenerGuard::default();
     let mut updaters = updater_dirs();
     let mut fast_until: Option<Instant> = None;
     let mut fast_polls: u32 = 0;
@@ -144,12 +143,6 @@ fn run() {
         if cycles % REDISCOVER_EVERY == 0 {
             installs = discover();
             updaters = updater_dirs();
-        }
-        // Not on the first poll: at logon this task and the relay's start
-        // together, and a miss before the relay has bound would start the count
-        // early - the log says ninety seconds and it should mean it.
-        if cycles > 0 && cycles % LISTENER_CHECK_EVERY == 0 {
-            listener.check();
         }
         #[cfg(windows)]
         if cycles % 15 == 0 {
@@ -222,69 +215,6 @@ pub(crate) fn updater_busy(dirs: &[PathBuf]) -> bool {
             .filter(|p| p.extension().is_some_and(|x| x == "exe"))
             .any(|p| OpenOptions::new().append(true).open(&p).is_err())
     })
-}
-
-/// How often the proxy listener is looked at, in polls. 15 x 2 s = 30 s.
-const LISTENER_CHECK_EVERY: u32 = 15;
-/// Consecutive misses before the variable comes off: 3 x 30 s. A relay
-/// restarting under its task (3 tries a minute apart) is back well inside that;
-/// one that is not coming back has by then cost Antigravity ninety seconds of
-/// `connection refused` on every request, which is enough.
-const LISTENER_DEAD_AFTER: u32 = 3;
-/// Once the variable was found absent or removed, how long before the (slow,
-/// PowerShell-backed) environment read is worth repeating.
-const ENV_RECHECK: Duration = Duration::from_secs(10 * 60);
-
-/// Keeps the proxy variable from outliving the listener it names.
-///
-/// Originally this guarded the machine: the variable was `HTTPS_PROXY`, user-wide,
-/// so a relay that died and did not come back took everything proxy-aware down
-/// with it (G20, seen once after a revert). Since `2.11.0_5` the name is private
-/// to the patched binaries, so what is at stake is Antigravity alone - but that
-/// still means no models and no sign-in, so the guard stays: no listener for a
-/// while and off the variable comes; the relay puts it back when it starts again
-/// (`endpoint::ensure_proxy_env`). A proxy the user set is under a different name
-/// entirely and is never touched.
-#[derive(Default)]
-struct ListenerGuard {
-    misses: u32,
-    env_checked_at: Option<std::time::Instant>,
-}
-
-impl ListenerGuard {
-    fn check(&mut self) {
-        if crate::proxy::listener_answers() {
-            self.misses = 0;
-            return;
-        }
-        self.misses = self.misses.saturating_add(1);
-        if self.misses < LISTENER_DEAD_AFTER {
-            return;
-        }
-        if self
-            .env_checked_at
-            .is_some_and(|at| at.elapsed() < ENV_RECHECK)
-        {
-            return;
-        }
-        self.env_checked_at = Some(std::time::Instant::now());
-        let url = crate::proxy::proxy_url();
-        let ca = crate::proxy::ca_cert_path().to_string_lossy().to_string();
-        match crate::endpoint::remove_proxy_if_ours(&url, &ca) {
-            Ok(true) => log(&format!(
-                "прокси {} не отвечает {} с — переменная {} снята",
-                url,
-                LISTENER_DEAD_AFTER * LISTENER_CHECK_EVERY * POLL.as_secs() as u32,
-                crate::endpoint::PROXY_ENV_VAR
-            )),
-            Ok(false) => {}
-            Err(e) => log(&format!(
-                "не удалось снять {}: {}",
-                crate::endpoint::PROXY_ENV_VAR,
-                e
-            )),
-        }
-    }
 }
 
 /// Starts the app this watcher closed, if it closed one.
@@ -455,7 +385,7 @@ fn targets(inst: &Path) -> Vec<PathBuf> {
 }
 
 /// Patches every file of one install now, the way the watcher does once a file
-/// has settled: both renames in one write per native binary, the IDE's
+/// has settled: the client patch for each native binary, the IDE's
 /// `main.js`, and a process holding a binary closed only if the write actually
 /// meets its lock (D22 - Desktop restarts its language server by itself and
 /// reloads the window). An already-patched file is read and left alone.

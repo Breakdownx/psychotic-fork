@@ -12,9 +12,6 @@ pub const FORWARDER_FLAG: &str = "--dns-forwarder";
 /// Hidden flag that runs ONLY the update watchdog - no relay, no DNS, no network.
 /// Handled before any UI, same as the relay flag.
 pub const WATCHDOG_FLAG: &str = "--watchdog";
-/// Hidden flag that runs ONLY the local CONNECT proxy (`proxy::run`) - the Linux
-/// phase-2 region route. No DNS listener, so no systemd-resolved conflict.
-pub const PROXY_FLAG: &str = "--proxy";
 
 #[cfg(target_os = "windows")]
 pub use windows_impl::*;
@@ -593,11 +590,7 @@ mod windows_impl {
     }
 }
 
-// Linux: phase 2 is the **proxy route**, not the DNS relay. This runs the local
-// CONNECT proxy (`proxy::run`, via `--proxy`) as a systemd **user** unit - no
-// root, no `:53` listener, so systemd-resolved is never touched. The DNS relay
-// (phase 5) would be a separate, privileged story; this is deliberately the
-// unprivileged half that already lifts the region gate through a permitted exit.
+// Unix watchdog installation and removal of legacy proxy services.
 #[cfg(not(target_os = "windows"))]
 mod unix_impl {
     use std::fs;
@@ -605,7 +598,7 @@ mod unix_impl {
     #[cfg(not(target_os = "macos"))]
     use std::process::Command;
 
-    use super::{PROXY_FLAG, WATCHDOG_FLAG};
+    use super::WATCHDOG_FLAG;
 
     #[cfg(not(target_os = "macos"))]
     const UNIT_NAME: &str = "ag-unlocker-proxy.service";
@@ -691,47 +684,10 @@ mod unix_impl {
         false
     }
 
-    /// Installs the exe under the XDG data dir, writes a systemd **user** unit that
-    /// runs it with `--proxy`, and starts it. No root: `systemctl --user` targets
-    /// the caller's own session manager, which is why the whole Linux flow runs
-    /// unprivileged (and "Run as a Program" works without a password prompt).
+    /// Compatibility entry point: the retired HTTP proxy cannot be installed.
     #[cfg(not(target_os = "macos"))]
     pub fn ensure_running() -> Result<(), String> {
-        let replaced = install_copy()?;
-
-        let up = unit_path();
-        if let Some(p) = up.parent() {
-            fs::create_dir_all(p).map_err(|e| format!("не создать {}: {}", p.display(), e))?;
-        }
-        // The window finds the service's `gate.json` through `log_dir()`, which
-        // follows `XDG_DATA_HOME`. The systemd user manager does not always carry
-        // the desktop session's value, and a service writing into a different
-        // directory than the window reads leaves the card on «Служба запускается»
-        // for good - so the unit is given the directory the window uses.
-        let unit = unit_text("Antigravity Unlocker local proxy", PROXY_FLAG);
-        // A unit from an older build lacks the data-dir line; running on under
-        // it keeps the service writing where the window does not look.
-        let unit_changed = fs::read_to_string(&up).map_or(true, |old| old != unit);
-        fs::write(&up, unit).map_err(|e| format!("не записать юнит: {}", e))?;
-
-        systemctl(&["daemon-reload"]);
-        if !systemctl(&["enable", "--now", UNIT_NAME]) {
-            return Err("не удалось запустить systemd-юнит (systemctl --user)".to_string());
-        }
-        // `enable --now` leaves a unit that is already running alone, so a copy
-        // just replaced would sit unused until the next login.
-        if (replaced || unit_changed) && !systemctl(&["restart", UNIT_NAME]) {
-            return Err(
-                "новая версия прокси записана, но служба не перезапустилась (systemctl --user)"
-                    .to_string(),
-            );
-        }
-        // The watcher runs the same copy: left on the old inode it would keep
-        // the previous version's patch routines until the next login.
-        if replaced && is_watchdog_enabled() {
-            systemctl(&["restart", WATCHDOG_UNIT_NAME]);
-        }
-        Ok(())
+        Err("Локальный HTTP-прокси удалён".to_string())
     }
 
     /// A user unit running the installed copy with `flag`.
@@ -809,9 +765,7 @@ mod unix_impl {
 
     #[cfg(not(target_os = "macos"))]
     pub fn enable() -> Result<(), String> {
-        ensure_running()?;
-        let _ = systemctl(&["restart", UNIT_NAME]);
-        Ok(())
+        Err("Локальный HTTP-прокси удалён".to_string())
     }
 
     /// Writes the watcher's user unit and starts it. Only the file and the unit:
@@ -860,8 +814,11 @@ mod unix_impl {
         systemctl(&["disable", "--now", UNIT_NAME]);
         let _ = fs::remove_file(unit_path());
         systemctl(&["daemon-reload"]);
-        // The watcher runs the same copy: while its unit is there the file stays.
-        if !is_watchdog_enabled() {
+        // Both services share the executable. Keep it for a registered watcher
+        // or a watcher still running after its unit file was removed.
+        if !is_watchdog_enabled()
+            && !systemctl(&["is-active", "--quiet", WATCHDOG_UNIT_NAME])
+        {
             let _ = fs::remove_file(installed_exe());
             let _ = fs::remove_dir(install_dir());
         }
@@ -909,31 +866,15 @@ mod unix_impl {
         crate::macos::agent_is_running(PROXY_LABEL)
     }
 
-    /// Installs the copy, writes the agent and loads it. A changed plist is
-    /// reloaded by `agent_install`; a replaced copy under an unchanged plist
-    /// needs a kickstart to leave the old binary.
+    /// Compatibility entry point: the retired HTTP proxy cannot be installed.
     #[cfg(target_os = "macos")]
     pub fn ensure_running() -> Result<(), String> {
-        let replaced = install_copy()?;
-        let changed =
-            crate::macos::agent_install(PROXY_LABEL, &agent_text(PROXY_LABEL, PROXY_FLAG))?;
-        if replaced && !changed && !crate::macos::agent_restart(PROXY_LABEL) {
-            return Err(
-                "новая версия прокси записана, но служба не перезапустилась (launchctl)"
-                    .to_string(),
-            );
-        }
-        if replaced && is_watchdog_enabled() {
-            crate::macos::agent_restart(WATCHDOG_LABEL);
-        }
-        Ok(())
+        Err("Локальный HTTP-прокси удалён".to_string())
     }
 
     #[cfg(target_os = "macos")]
     pub fn enable() -> Result<(), String> {
-        ensure_running()?;
-        let _ = crate::macos::agent_restart(PROXY_LABEL);
-        Ok(())
+        Err("Локальный HTTP-прокси удалён".to_string())
     }
 
     #[cfg(target_os = "macos")]
@@ -957,7 +898,8 @@ mod unix_impl {
     #[cfg(target_os = "macos")]
     pub fn disable() -> Result<(), String> {
         crate::macos::agent_remove(PROXY_LABEL);
-        if !is_watchdog_enabled() {
+        // Removing the proxy agent must not remove the live watchdog's image.
+        if !is_watchdog_enabled() && !crate::macos::agent_is_running(WATCHDOG_LABEL) {
             let _ = fs::remove_file(installed_exe());
             let _ = fs::remove_dir(install_dir());
         }

@@ -59,16 +59,12 @@ impl App {
                 }
                 s
             }
-            Row::Advanced => "Детали обхода: DNS-серверы, прокси, выходы.".into(),
+            Row::Advanced => "Детали обхода: DNS-серверы и ротация.".into(),
             Row::Provider(_) => {
                 "Пробел — включить или выключить сервер, +/- — выше или ниже в списке.".into()
             }
             Row::CustomDnsText => {
                 "Enter — задать свой DNS: IPv4, https://… (DoH) или tls://… (DoT) через пробел."
-                    .into()
-            }
-            Row::OwnProxyText => {
-                "Enter — изменить адрес: логин:пароль@адрес:порт (или адрес:порт без пароля)."
                     .into()
             }
             Row::Report => {
@@ -164,18 +160,6 @@ impl App {
                 };
                 ListItem::new(Line::from(vec![
                     Span::raw("      Свой DNS: "),
-                    Span::styled(shown, Style::new().fg(palette::MUTED)),
-                ]))
-            }
-            Row::OwnProxyText => {
-                let text = self.own_proxy_text();
-                let shown = if text.is_empty() {
-                    "не задан".to_string()
-                } else {
-                    text
-                };
-                ListItem::new(Line::from(vec![
-                    Span::raw("      Адрес прокси: "),
                     Span::styled(shown, Style::new().fg(palette::MUTED)),
                 ]))
             }
@@ -323,7 +307,6 @@ impl App {
         let color = match h.tone {
             Tone::Ok => palette::OK,
             Tone::Wait => palette::CYAN,
-            Tone::Fixing => palette::WARN,
             Tone::Action => palette::ERROR,
             Tone::Off => palette::MUTED,
         };
@@ -425,14 +408,6 @@ impl App {
                 text,
                 None,
             ),
-            Some(Input::OwnProxy { text }) => (
-                " Свой HTTP-прокси ",
-                "Формат: логин:пароль@адрес:порт — или просто адрес:порт, если пароля нет. \
-                 Например ivan:secret@203.0.113.9:3128. Только HTTP-прокси. \
-                 Пустая строка — убрать прокси.",
-                text,
-                None,
-            ),
             None => return,
         };
         let w = area.width.saturating_sub(8).min(90);
@@ -444,19 +419,12 @@ impl App {
             width: w,
             height: h,
         };
-        let shown = match &self.input {
-            Some(Input::OwnProxy { .. }) => match text.rsplit_once('@') {
-                Some((_, address)) => format!("••••@{address}"),
-                None => text.clone(),
-            },
-            _ => text.clone(),
-        };
         let mut lines = vec![
             Line::styled(hint, Style::new().fg(palette::MUTED)),
             Line::raw(""),
             Line::from(vec![
                 Span::raw("› "),
-                Span::raw(shown),
+                Span::raw(text.clone()),
                 Span::styled("▏", Style::new().fg(palette::CYAN)),
             ]),
         ];

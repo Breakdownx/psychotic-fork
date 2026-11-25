@@ -330,10 +330,6 @@ pub fn getenv(name: &str) -> Option<String> {
     (out.status.success() && !v.is_empty()).then_some(v)
 }
 
-pub fn setenv(name: &str, value: &str) -> bool {
-    launchctl(&["setenv", name, value]).is_some_and(|o| o.status.success())
-}
-
 pub fn unsetenv(name: &str) -> bool {
     launchctl(&["unsetenv", name]).is_some_and(|o| o.status.success())
 }
@@ -351,27 +347,6 @@ pub fn persisted_env(name: &str) -> Option<String> {
         .replace("&lt;", "<")
         .replace("&amp;", "&");
     (!v.trim().is_empty()).then_some(v)
-}
-
-/// Sets `name` now and at every later login. Returns whether anything changed.
-pub fn persist_env(name: &str, value: &str) -> Result<bool, String> {
-    let plist = agent_plist(
-        ENV_LABEL,
-        &[
-            "/bin/launchctl".to_string(),
-            "setenv".to_string(),
-            name.to_string(),
-            value.to_string(),
-        ],
-        &[],
-        false,
-    );
-    let changed = agent_install(ENV_LABEL, &plist)?;
-    let live = getenv(name).as_deref() == Some(value);
-    if !live && !setenv(name, value) {
-        return Err(format!("launchctl setenv {name} не удался"));
-    }
-    Ok(changed || !live)
 }
 
 /// Takes `name` off now and drops the login agent. Returns whether either was there.

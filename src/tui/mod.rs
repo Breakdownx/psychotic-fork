@@ -109,7 +109,6 @@ pub fn run(note: Option<String>) -> Result<(), String> {
 /// A line being typed into, drawn as a box over the list.
 enum Input {
     Path { text: String, error: Option<String> },
-    OwnProxy { text: String },
     CustomDns { text: String },
 }
 
@@ -119,13 +118,12 @@ enum Row {
     /// The status card's one action, when it has one.
     Action(Action),
     Cap(Cap),
-    /// The bypass master switch (`ops::bypass_order`).
+    /// The DNS bypass switch.
     Bypass,
     Install(usize),
     /// The fold over «Настройки для опытных».
     Advanced,
     Provider(usize),
-    OwnProxyText,
     CustomDnsText,
     Report,
 }
@@ -261,7 +259,6 @@ impl App {
                 Event::Log(level, line) => self.log.push(level, line),
                 Event::Status(s) => self.status = Some(*s),
                 Event::Busy(what) => self.busy = what,
-                Event::ProxySaved(_, _) => {}
                 Event::Deactivated => self.busy = None,
             }
             any = true;
@@ -300,7 +297,6 @@ impl App {
         let text = text.trim();
         if let Some(
             Input::Path { text: t, .. }
-            | Input::OwnProxy { text: t }
             | Input::CustomDns { text: t },
         ) = &mut self.input
         {
@@ -311,7 +307,7 @@ impl App {
     fn on_input_key(&mut self, k: KeyEvent, ctrl: bool) {
         let Some(input) = &mut self.input else { return };
         let text = match input {
-            Input::Path { text, .. } | Input::OwnProxy { text } | Input::CustomDns { text } => text,
+            Input::Path { text, .. } | Input::CustomDns { text } => text,
         };
         match k.code {
             KeyCode::Esc => self.input = None,
@@ -342,10 +338,6 @@ impl App {
                     }
                 }
             }
-            Some(Input::OwnProxy { text }) => self.worker.send(Cmd::SetOwnProxy {
-                text: text.trim().to_string(),
-                enable: true,
-            }),
             Some(Input::CustomDns { text }) => {
                 self.worker.send(Cmd::SetCustomDns(text.trim().to_string()))
             }
@@ -454,15 +446,6 @@ impl App {
                     self.toast(format!("Не включается: {why}"));
                     return;
                 }
-                if cap == Cap::OwnProxy
-                    && !state.is_on()
-                    && !self.status.as_ref().is_some_and(|s| s.own_proxy_configured)
-                {
-                    self.input = Some(Input::OwnProxy {
-                        text: String::new(),
-                    });
-                    return;
-                }
                 self.worker.send(Cmd::Set(cap, !state.is_on()));
             }
             Row::Bypass => {
@@ -470,9 +453,7 @@ impl App {
                     return;
                 }
                 let on = !self.status.as_ref().is_some_and(|s| s.bypass_on());
-                for cap in ops::bypass_order(on) {
-                    self.worker.send(Cmd::Set(cap, on));
-                }
+                self.worker.send(Cmd::Set(Cap::Dns, on));
             }
             Row::Install(i) => {
                 let text = self.install_path(i).unwrap_or_default();
@@ -491,11 +472,6 @@ impl App {
                     self.worker
                         .send(Cmd::SetProvider(p.name.clone(), !p.enabled));
                 }
-            }
-            Row::OwnProxyText => {
-                self.input = Some(Input::OwnProxy {
-                    text: crate::settings::Settings::load().own_proxy,
-                })
             }
             Row::CustomDnsText => {
                 self.input = Some(Input::CustomDns {
@@ -589,13 +565,6 @@ impl App {
             .unwrap_or_default()
     }
 
-    fn own_proxy_text(&self) -> String {
-        self.status
-            .as_ref()
-            .map(|s| s.own_proxy_text.clone())
-            .unwrap_or_default()
-    }
-
     /// The window's «Сохранить отчёт». The file is the deliverable - a report
     /// pasted into a chat is a wall of text that arrives truncated - so it goes
     /// to the Desktop, and to the state directory when there is no Desktop to
@@ -640,22 +609,22 @@ impl App {
             rows.push(Row::Action(a));
         }
         rows.push(Row::Cap(Cap::ClientPatch));
-        rows.push(Row::Bypass);
+        if cfg!(target_os = "windows") {
+            rows.push(Row::Bypass);
+        }
         rows.push(Row::Cap(Cap::Watchdog));
         let installs = self.status.as_ref().map_or(0, |s| s.installs.len());
         rows.extend((0..installs).map(Row::Install));
-        rows.push(Row::Advanced);
-        if self.advanced {
-            rows.push(Row::Cap(Cap::Dns));
+        if cfg!(target_os = "windows") {
+            rows.push(Row::Advanced);
+        }
+        if self.advanced && cfg!(target_os = "windows") {
             let providers = self.status.as_ref().map_or(0, |s| s.providers.len());
             rows.extend((0..providers).map(Row::Provider));
             if providers > 0 {
                 rows.push(Row::Cap(Cap::DnsRotation));
             }
             rows.push(Row::CustomDnsText);
-            rows.push(Row::Cap(Cap::LocalProxy));
-            rows.push(Row::Cap(Cap::OwnProxy));
-            rows.push(Row::OwnProxyText);
         }
         if report::ENABLED {
             rows.push(Row::Report);

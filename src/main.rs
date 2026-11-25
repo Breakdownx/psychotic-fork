@@ -24,7 +24,6 @@ mod deactivate;
 mod sidecar;
 mod dns_client;
 mod dns_forwarder;
-mod dns_route;
 mod doh;
 mod dot;
 mod egress;
@@ -32,14 +31,12 @@ mod elevate;
 mod endpoint;
 mod gate;
 mod gui;
-mod health;
 mod hosts_pin;
 mod installs;
 mod instances;
 mod journal;
 #[cfg(windows)]
 mod launch_guard;
-mod loopback;
 mod ls_log;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -52,12 +49,10 @@ mod patch_ide;
 mod portcheck;
 mod proxy;
 mod resolvers;
-mod routes;
 mod settings;
 mod stale_env;
 mod tui;
 mod update;
-mod upstream;
 mod utils;
 mod watchdog;
 
@@ -93,19 +88,12 @@ pub fn restore_pristine_asar(resources: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// One install, patched. Carries what used to be printed.
-///
-/// `summary` is returned rather than folded into a process-wide flag on the way
-/// past: the console build died after one run, so a sticky "the proxy rename
-/// landed" atomic was harmless there. A window that patches twice would inherit
-/// the first run's verdict and go on writing the proxy variable for a rename
-/// that has since started failing. The caller owns the verdict for *its* run.
+/// One patched installation and its non-fatal cleanup warnings.
 pub struct InstallOutcome {
     pub label: &'static str,
     /// Non-fatal notes — a leftover override that would not come off. The patch
     /// succeeded anyway, so these are not errors.
     pub warnings: Vec<String>,
-    pub summary: patch_binary::BinarySummary,
 }
 
 pub fn process_install(install: &Path) -> Result<InstallOutcome, String> {
@@ -139,7 +127,6 @@ pub fn process_install(install: &Path) -> Result<InstallOutcome, String> {
             return Ok(InstallOutcome {
                 label: "Antigravity Desktop",
                 warnings,
-                summary: bin_summary,
             });
         }
 
@@ -182,7 +169,6 @@ pub fn process_install(install: &Path) -> Result<InstallOutcome, String> {
         return Ok(InstallOutcome {
             label: "Antigravity IDE",
             warnings,
-            summary: bin_summary,
         });
     } else if desktop_js.exists() {
         let js_patched = patch_desktop(install, &desktop_js)?;
@@ -193,7 +179,6 @@ pub fn process_install(install: &Path) -> Result<InstallOutcome, String> {
         return Ok(InstallOutcome {
             label: "Antigravity Desktop",
             warnings,
-            summary: bin_summary,
         });
     } else if install.join("agy.exe").is_file() || install.join("agy").is_file() {
         if bin_summary.ok == 0 {
@@ -209,7 +194,6 @@ pub fn process_install(install: &Path) -> Result<InstallOutcome, String> {
         return Ok(InstallOutcome {
             label: installs::install_label(install),
             warnings,
-            summary: bin_summary,
         });
     }
 
@@ -247,6 +231,14 @@ pub fn remove_legacy_ca_quiet() -> bool {
 }
 
 fn main() {
+    if env::args().skip(1).any(|a| {
+        matches!(a.as_str(), "--proxy" | "--proxy-service" | "--dns-service")
+            || (!cfg!(windows) && a == background::FORWARDER_FLAG)
+    }) {
+        utils::attach_parent_console();
+        eprintln!("Режим службы недоступен в этой сборке.");
+        std::process::exit(2);
+    }
     #[cfg(windows)]
     if env::args_os().nth(1).is_some_and(|a| a == launch_guard::FLAG) {
         launch_guard::run();
@@ -274,15 +266,6 @@ fn main() {
     if env::args().any(|a| a == background::WATCHDOG_FLAG) {
         dns_forwarder::detach_console();
         watchdog::run_forever();
-        return;
-    }
-
-    if env::args().any(|a| a == background::PROXY_FLAG) {
-        dns_forwarder::detach_console();
-        if let Err(e) = dns_forwarder::run_proxy_service() {
-            dns_forwarder::log_fatal(&e);
-            std::process::exit(1);
-        }
         return;
     }
 

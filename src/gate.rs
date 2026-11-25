@@ -1,26 +1,5 @@
-//! What the bypass is doing about the region 400, written where the window can
-//! read it — and the window's own live watch of the client's log.
-//!
-//! The watch that *acts* lives in the relay (`ls_log::poll` →
-//! `dns_forwarder::answer_region_400`) and has to: that is the process holding
-//! the route table, the resolver cache and the tunnel verdict. The window is a
-//! different process, and until now its only view of any of it was
-//! `forwarder.log` — a file written for a person to read, not for a parser
-//! (P29). So the relay leaves one small record beside that log: what it is doing
-//! now, and what it did about the last refusal.
-//!
-//! Two halves of one answer, and the split is deliberate:
-//!
-//! * **the symptom** — `ls_log::newest_refusal`, read by the window itself, so
-//!   "Antigravity is hitting the gate right now" is visible whether or not
-//!   anything of ours is running. That is exactly the case where the user most
-//!   needs to be told something (the bypass is off, or the relay died).
-//! * **the answer** — this record, written by the side that knows. The window
-//!   never infers "it was intercepted" from a switch being on; it says so only
-//!   when the relay wrote down that it did something.
-//!
-//! Best-effort in both directions. A missing, stale or unparsable record means
-//! the window says nothing about the answer, never that there was none.
+//! DNS service heartbeat, listener diagnostics, and read-only client log status.
+//! Older proxy-specific report fields remain readable for existing gate.json files.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -77,8 +56,6 @@ pub struct Report {
     pub vpn_exit: String,
     /// At least one open gate connection uses a VPN source interface.
     pub vpn_traffic: bool,
-    /// The route table, best first, for the report the window copies out.
-    pub routes: Vec<crate::routes::Row>,
     /// The relay generation that wrote this.
     pub version: u32,
     /// What keeps a listener of the relay from coming up (P53, `portcheck`).
@@ -286,7 +263,6 @@ pub struct Now<'a> {
     pub loopback: bool,
     pub tunnel: bool,
     pub vpn_exit: &'a str,
-    pub routes: Vec<crate::routes::Row>,
 }
 
 /// Called once per warm pass with what the relay is doing now.
@@ -300,11 +276,6 @@ pub fn publish(now: Now<'_>) {
         r.loopback = now.loopback;
         r.tunnel = now.tunnel;
         r.vpn_exit = now.vpn_exit.to_string();
-        #[cfg(not(target_os = "windows"))]
-        {
-            r.vpn_traffic = crate::netif::sources_use_vpn(&crate::routes::open_upstream_sources());
-        }
-        r.routes = now.routes;
         r.version = crate::dns_forwarder::RELAY_VERSION;
         r.reached_at = crate::net::last_reached();
         if r.exe.is_empty() {
@@ -341,29 +312,6 @@ pub fn set_blocker(what: &str, blocker: Option<Blocker>) {
                 .map(|p| p.display().to_string())
                 .unwrap_or_default();
         }
-    });
-}
-
-/// Called when a refusal has been answered, with what was done about it.
-pub fn record_episode(count: u32, acted: String, route: Option<&str>) {
-    update(|r| {
-        r.last_400 = Some(Episode {
-            at: now_unix(),
-            count,
-            acted,
-            route: route.unwrap_or_default().to_string(),
-            bypassed: route.is_none(),
-        })
-    });
-}
-
-/// Called when a model answer shows up in a client log.
-pub fn record_answer(route: Option<&str>) {
-    update(|r| {
-        r.last_ok = Some(Proof {
-            at: now_unix(),
-            route: route.unwrap_or_default().to_string(),
-        })
     });
 }
 

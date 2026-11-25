@@ -21,45 +21,6 @@ fn const_from_canary_rs(src: &str, name: &str) -> String {
     rest[..end].to_string()
 }
 
-/// Bakes `plain` into `OUT_DIR/<out_name>` as an AES-256-GCM blob under the
-/// given const prefix, with a key and nonce drawn fresh for this build.
-///
-/// Two private things need exactly this treatment - the relay credential and the
-/// built-in exit list - and a second copy of the cipher setup is a second place
-/// to get it wrong. Neither the key nor the plaintext is in any committed source;
-/// the honest ceiling is unchanged (D8), this keeps them off a `strings` dump.
-fn bake_secret(out_name: &str, prefix: &str, plain: &str) {
-    use aes_gcm::aead::Aead;
-    use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
-    let mut key = [0u8; 32];
-    let mut nonce = [0u8; 12];
-    getrandom::getrandom(&mut key).expect("random key");
-    getrandom::getrandom(&mut nonce).expect("random nonce");
-    let ct = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key))
-        .encrypt(Nonce::from_slice(&nonce), plain.as_bytes())
-        .expect("encrypt build secret");
-    let bytes = |b: &[u8]| {
-        b.iter()
-            .map(|x| x.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let out = Path::new(&env::var("OUT_DIR").expect("OUT_DIR unset")).join(out_name);
-    fs::write(
-        &out,
-        format!(
-            "pub const {p}_KEY: [u8; 32] = [{}];\n\
-             pub const {p}_NONCE: [u8; 12] = [{}];\n\
-             pub const {p}_CT: &[u8] = &[{}];\n",
-            bytes(&key),
-            bytes(&nonce),
-            bytes(&ct),
-            p = prefix
-        ),
-    )
-    .unwrap_or_else(|e| panic!("failed to write {}: {}", out_name, e));
-}
-
 /// Must stay identical to canary::token_for() and to tools/canary_check.py.
 fn token_for(seed: &str, sep: &str, version: &str) -> String {
     let mut hasher = Sha256::new();
@@ -107,74 +68,6 @@ fn main() {
     println!(
         "cargo:warning=release canary {} (v{})",
         release_token, version
-    );
-
-    // The fast relay route's whole method lives in the gitignored `src/relay.rs`
-    // and is compiled in only when it AND the credential file are present (owner
-    // build) - the `relay` cfg. A public clone lacks both, builds under
-    // `cfg(not(relay))`, and runs the DNS route. The credential is AES-256-GCM
-    // encrypted here with a random per-build key; neither the key nor the method
-    // is in any committed source. This is not un-reversible (agy's AES-GCM vault
-    // was reversed, and so can an official binary): it keeps the method off the
-    // public repo and off a `strings` dump of the packed binary.
-    println!("cargo::rustc-check-cfg=cfg(relay)");
-    println!("cargo:rerun-if-changed=.relay_key");
-    println!("cargo:rerun-if-changed=src/relay.rs");
-    // Off by default since 2.22.0: xbox took the relay down (2026-10-09 - its
-    // address now serves an unrelated nginx and answers CONNECT with 400), so the
-    // route only cost a failed handshake before benching itself. The files stay
-    // local; `AG_WITH_RELAY=1` compiles the route back in if it returns.
-    println!("cargo:rerun-if-env-changed=AG_WITH_RELAY");
-    let relay = std::env::var("AG_WITH_RELAY").is_ok_and(|v| v == "1")
-        && Path::new("src/relay.rs").exists()
-        && Path::new(".relay_key").exists();
-    if relay {
-        println!("cargo:rustc-cfg=relay");
-        let cred = fs::read_to_string(".relay_key")
-            .expect("read .relay_key")
-            .trim()
-            .to_string();
-        bake_secret("relay_gen.rs", "RELAY", &cred);
-    }
-
-    // The built-in exits - third-party CONNECT proxies that already come out in a
-    // permitted region, so they lift the gate with no DNS trickery at all. Same
-    // arrangement as the relay for the same reason: the *method* is unremarkable
-    // (a plain CONNECT, which upstream.rs already speaks in public source), so
-    // what is private is the address list. `.exits` holds it, `src/exits.rs` uses
-    // it, both are gitignored, and a public clone compiles `cfg(not(exits))` and
-    // takes the routes below.
-    println!("cargo::rustc-check-cfg=cfg(exits)");
-    println!("cargo:rerun-if-changed=.exits");
-    println!("cargo:rerun-if-changed=src/exits.rs");
-    // Comments and blank lines are stripped here rather than at runtime, so
-    // nothing but addresses is ever inside the binary. A list with no address
-    // left (every exit measured dead and struck off) is the same as no file: the
-    // route compiles out like it does in a public clone, instead of failing the
-    // build.
-    let exit_list = if Path::new("src/exits.rs").exists() && Path::new(".exits").exists() {
-        fs::read_to_string(".exits")
-            .expect("read .exits")
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        String::new()
-    };
-    let exits = !exit_list.is_empty();
-    if exits {
-        println!("cargo:rustc-cfg=exits");
-        bake_secret("exits_gen.rs", "EXITS", &exit_list);
-    }
-
-    // Which private routes this build actually got. Printed because the failure
-    // mode is silent: a release built with one of the files missing works fine
-    // and is simply slower, which is exactly the kind of thing that ships.
-    println!(
-        "cargo:warning=private routes: relay={} exits={}",
-        relay, exits
     );
 
     if env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows" {
