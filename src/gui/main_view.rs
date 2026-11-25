@@ -17,6 +17,7 @@ enum Page {
 #[derive(Default)]
 pub(super) struct ViewState {
     page: Page,
+    brand_icon: Option<egui::TextureHandle>,
     log_copied: Option<(Instant, bool)>,
     confirm_deactivation: bool,
 }
@@ -27,19 +28,51 @@ pub fn view(app: &mut App, ui: &mut egui::Ui) {
         .frame(
             egui::Frame::new()
                 .fill(colors.chrome)
-                .inner_margin(egui::Margin::symmetric(18, 8)),
+                .inner_margin(egui::Margin::symmetric(20, 9)),
         )
         .show(ui, |ui| {
             ui.horizontal(|ui| {
+                let icon = app
+                    .main_view
+                    .brand_icon
+                    .get_or_insert_with(|| super::icon::unlocker_texture(ui.ctx()));
+                ui.add(
+                    egui::Image::new((icon.id(), egui::vec2(28.0, 28.0)))
+                        .alt_text("Antigravity Unlocker"),
+                );
+                ui.label(egui::RichText::new("Antigravity").size(18.0).strong());
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(4.0);
                 for (page, label) in [
                     (Page::Overview, "Обзор"),
                     (Page::Installs, "Установки"),
                     (Page::Log, "Журнал"),
                 ] {
                     let selected = app.main_view.page == page;
-                    let tab =
-                        egui::Button::selectable(selected, label).min_size(egui::vec2(88.0, 32.0));
-                    if ui.add(tab).clicked() && !selected {
+                    let ink = if selected {
+                        colors.accent_text
+                    } else {
+                        colors.muted
+                    };
+                    let tab = ui
+                        .add(
+                            egui::Button::selectable(
+                                selected,
+                                egui::RichText::new(label).color(ink),
+                            )
+                            .frame_when_inactive(false)
+                            .min_size(egui::vec2(82.0, 32.0)),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if selected {
+                        let bar = egui::Rect::from_center_size(
+                            tab.rect.center_bottom() - egui::vec2(0.0, 1.0),
+                            egui::vec2(24.0, 2.0),
+                        );
+                        ui.painter().rect_filled(bar, 1, colors.accent);
+                    }
+                    if tab.clicked() && !selected {
                         app.main_view.page = page;
                         app.log_all_selected = false;
                     }
@@ -181,25 +214,54 @@ fn status_color(patched: Option<bool>, colors: &theme::Palette) -> egui::Color32
 }
 
 fn overview(app: &mut App, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.heading("Состояние установок");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if widgets::command(
-                ui,
-                widgets::REFRESH,
-                "Проверить",
-                false,
-                app.status.is_some() && !app.is_busy(),
-            )
-            .on_hover_text("Заново проверить состояние локальных файлов")
-            .clicked()
-            {
-                app.busy = Some("Проверка установок".into());
-                app.worker.send(Cmd::DeepRefresh);
-            }
-        });
-    });
-    ui.add_space(12.0);
+    let colors = theme::palette(ui);
+    let (banner, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 124.0),
+        egui::Sense::hover(),
+    );
+    paint_overview_banner(ui, banner, colors);
+    let inset = egui::vec2(20.0, 12.0);
+    let mut controls = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_max(
+                banner.min + inset,
+                egui::pos2(banner.center().x + 58.0, banner.max.y - inset.y),
+            ))
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    controls.spacing_mut().item_spacing.y = 4.0;
+    controls.heading("Состояние установок");
+    if let Some(status) = &app.status {
+        let mut found = status
+            .installs
+            .iter()
+            .filter(|row| row.path.is_some())
+            .peekable();
+        if found.peek().is_some() {
+            let total = found.clone().count();
+            let patched = found.filter(|row| row.patched == Some(true)).count();
+            controls.label(
+                egui::RichText::new(format!("Патч подтверждён для {patched} из {total}"))
+                    .size(13.0)
+                    .color(colors.muted),
+            );
+        }
+    }
+    controls.add_space(3.0);
+    if widgets::command(
+        &mut controls,
+        widgets::REFRESH,
+        "Проверить",
+        true,
+        app.status.is_some() && !app.is_busy(),
+    )
+    .on_hover_text("Заново проверить состояние локальных файлов")
+    .clicked()
+    {
+        app.busy = Some("Проверка установок".into());
+        app.worker.send(Cmd::DeepRefresh);
+    }
+    ui.add_space(5.0);
     let Some(status) = &app.status else {
         scanning(ui);
         return;
@@ -211,10 +273,74 @@ fn overview(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
+/// The offset contours repeat the illuminated arch on the lock's face.
+fn paint_overview_banner(ui: &egui::Ui, rect: egui::Rect, colors: &theme::Palette) {
+    let painter = ui.painter_at(rect);
+    let cut = 12.0;
+    let corners = [
+        rect.left_top(),
+        rect.right_top() - egui::vec2(cut, 0.0),
+        rect.right_top() + egui::vec2(0.0, cut),
+        rect.right_bottom(),
+        rect.left_bottom() + egui::vec2(cut, 0.0),
+        rect.left_bottom() - egui::vec2(0.0, cut),
+    ];
+    let left = colors.card.lerp_to_gamma(colors.accent, 0.06);
+    let right = colors.card.lerp_to_gamma(colors.violet, 0.16);
+    let mut mesh = egui::Mesh::default();
+    for point in corners {
+        mesh.colored_vertex(
+            point,
+            left.lerp_to_gamma(right, (point.x - rect.left()) / rect.width()),
+        );
+    }
+    for i in 1..5 {
+        mesh.add_triangle(0, i, i + 1);
+    }
+    // A single mesh also keeps the linework inexpensive on software renderers.
+    let origin = rect.right_top() + egui::vec2(-232.0, 14.0);
+    for layer in 0..12 {
+        let depth = layer as f32 / 11.0;
+        let first = mesh.vertices.len() as u32;
+        for step in 0..=48 {
+            let t = step as f32 / 48.0;
+            let phase = (std::f32::consts::PI * t).sin();
+            let x = t * 205.0 + depth * 19.0;
+            let y = 78.0 + depth * 22.0 - phase.powi(3) * (76.0 - depth * 16.0);
+            let point = origin + egui::vec2(x, y);
+            let tint = colors.accent.lerp_to_gamma(colors.violet, t);
+            let ink = tint.gamma_multiply(if layer == 0 {
+                0.94
+            } else {
+                0.55 - depth * 0.24
+            });
+            let half_width = if layer == 0 { 1.15 } else { 0.56 };
+            mesh.colored_vertex(point - egui::vec2(0.0, half_width), ink);
+            mesh.colored_vertex(point + egui::vec2(0.0, half_width), ink);
+            if step > 0 {
+                let i = first + step * 2;
+                mesh.add_triangle(i - 2, i - 1, i);
+                mesh.add_triangle(i, i - 1, i + 1);
+            }
+        }
+    }
+    painter.add(mesh);
+    painter.add(egui::Shape::closed_line(
+        corners.to_vec(),
+        egui::Stroke::new(1.0, colors.line),
+    ));
+}
+
 fn scanning(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.add(egui::Spinner::new().size(16.0));
-        ui.label("Проверяем установленные приложения…");
+    widgets::card(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::Spinner::new()
+                    .size(16.0)
+                    .color(theme::palette(ui).accent),
+            );
+            ui.label("Проверяем установленные приложения…");
+        });
     });
 }
 
@@ -222,7 +348,16 @@ fn installation_list(ui: &mut egui::Ui, rows: &[InstallRow]) {
     let colors = theme::palette(ui);
     let mut found = rows.iter().filter(|row| row.path.is_some()).peekable();
     if found.peek().is_none() {
-        ui.label("Установки Antigravity не найдены.");
+        widgets::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(widgets::FOLDER)
+                        .font(theme::icon_font(18.0))
+                        .color(colors.muted),
+                );
+                ui.label("Установки Antigravity не найдены.");
+            });
+        });
         return;
     }
     widgets::card(ui, |ui| {
@@ -238,8 +373,20 @@ fn installation_list(ui: &mut egui::Ui, rows: &[InstallRow]) {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let color = status_color(row.patched, colors);
-                    ui.colored_label(color, patch_label(row.patched));
-                    widgets::dot(ui, color);
+                    egui::Frame::new()
+                        .fill(colors.card.lerp_to_gamma(color, 0.09))
+                        .corner_radius(4)
+                        .inner_margin(egui::Margin::symmetric(8, 3))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                widgets::dot(ui, color);
+                                ui.label(
+                                    egui::RichText::new(patch_label(row.patched))
+                                        .size(13.0)
+                                        .color(color),
+                                );
+                            });
+                        });
                 });
             });
             ui.add_space(6.0);
@@ -259,8 +406,10 @@ fn installs(app: &mut App, ui: &mut egui::Ui) {
     let mut on = state.is_on();
     let enabled = !app.is_busy() && !matches!(state, State::Blocked(_));
     let title = "Разблокировка входа";
-    if widgets::switch_row(ui, &mut on, enabled, title, |ui| {
-        ui.label(title);
+    if widgets::card(ui, |ui| {
+        widgets::switch_row(ui, &mut on, enabled, title, |ui| {
+            section_title(ui, title);
+        })
     }) {
         app.worker.send(Cmd::Set(Cap::ClientPatch, on));
     }
@@ -286,10 +435,20 @@ fn integration_row(app: &mut App, ui: &mut egui::Ui, row: &InstallRow) {
     let colors = theme::palette(ui);
     let enabled = !app.is_busy();
     ui.horizontal(|ui| {
-        let label = ui.label(install_name(row));
-        if let Some(path) = &row.path {
-            label.on_hover_text(path.display().to_string());
-        }
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let label = ui.label(egui::RichText::new(install_name(row)).strong());
+            if let Some(path) = &row.path {
+                label.on_hover_text(path.display().to_string());
+                ui.label(
+                    egui::RichText::new(patch_label(row.patched))
+                        .size(12.0)
+                        .color(status_color(row.patched, colors)),
+                );
+            } else {
+                widgets::hint(ui, "Не найдено");
+            }
+        });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let edit = ui.add_enabled(
                 enabled,
@@ -318,11 +477,6 @@ fn integration_row(app: &mut App, ui: &mut egui::Ui, row: &InstallRow) {
                 {
                     app.worker.send(Cmd::PatchInstall(path.clone()));
                 }
-            }
-            if row.path.is_some() {
-                ui.colored_label(status_color(row.patched, colors), patch_label(row.patched));
-            } else {
-                ui.colored_label(colors.muted, "Не найдено");
             }
         });
     });
@@ -379,36 +533,46 @@ fn journal(app: &mut App, ui: &mut egui::Ui) {
             }
         });
     });
-    ui.separator();
-    egui::ScrollArea::vertical()
-        .id_salt("journal-lines")
-        .stick_to_bottom(true)
-        .auto_shrink([false, false])
+    ui.add_space(3.0);
+    let colors = theme::palette(ui);
+    egui::Frame::new()
+        .fill(colors.sunken)
+        .stroke(egui::Stroke::new(1.0, colors.line))
+        .corner_radius(theme::RADIUS)
+        .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
-            if app.log.is_empty() {
-                widgets::hint(ui, "Пусто");
-            }
-            let colors = theme::palette(ui);
-            let fill = ui.visuals().selection.bg_fill;
-            for (level, line) in &app.log {
-                let color = match level {
-                    Level::Ok => colors.ok,
-                    Level::Warn => colors.warn,
-                    Level::Err => colors.bad,
-                    Level::Step => colors.text,
-                    Level::Info => colors.muted,
-                };
-                let mut text = egui::RichText::new(log_line(*level, line))
-                    .color(color)
-                    .size(13.0);
-                if *level == Level::Step {
-                    text = text.strong();
-                }
-                if app.log_all_selected {
-                    text = text.background_color(fill);
-                }
-                ui.label(text);
-            }
+            ui.set_min_size(ui.available_size());
+            egui::ScrollArea::vertical()
+                .id_salt("journal-lines")
+                .stick_to_bottom(true)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if app.log.is_empty() {
+                        widgets::hint(ui, "Записей пока нет.");
+                    }
+                    let colors = theme::palette(ui);
+                    let fill = ui.visuals().selection.bg_fill;
+                    for (level, line) in &app.log {
+                        let color = match level {
+                            Level::Ok => colors.ok,
+                            Level::Warn => colors.warn,
+                            Level::Err => colors.bad,
+                            Level::Step => colors.violet,
+                            Level::Info => colors.muted,
+                        };
+                        let mut text = egui::RichText::new(log_line(*level, line))
+                            .monospace()
+                            .color(color)
+                            .size(13.0);
+                        if *level == Level::Step {
+                            text = text.strong();
+                        }
+                        if app.log_all_selected {
+                            text = text.background_color(fill);
+                        }
+                        ui.label(text);
+                    }
+                });
         });
 }
 
@@ -624,6 +788,7 @@ mod panel_tests {
 
         fn drawn_text(rows: &[InstallRow]) -> Vec<String> {
             let ctx = egui::Context::default();
+            theme::apply(&ctx);
             let output = ctx.run_ui(Default::default(), |ui| {
                 egui::CentralPanel::default().show(ui, |ui| installation_list(ui, rows));
             });

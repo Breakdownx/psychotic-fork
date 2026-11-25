@@ -166,13 +166,21 @@ impl eframe::App for App {
                 main_view::path_dialog(self, &ui.ctx().clone());
             }
             Screen::Deactivated => {
-                egui::CentralPanel::default().show(ui, |ui| {
-                    ui.heading("Анлокер полностью деактивирован");
-                    ui.label("Патчи, обход ошибки 400 и фоновые службы удалены.");
-                    if ui.button("Закрыть").clicked() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::new()
+                            .fill(theme::palette(ui).bg)
+                            .inner_margin(22),
+                    )
+                    .show(ui, |ui| {
+                        widgets::card(ui, |ui| {
+                            ui.heading("Анлокер полностью деактивирован");
+                            ui.label("Патчи, обход ошибки 400 и фоновые службы удалены.");
+                            if widgets::primary(ui, "Закрыть", true).clicked() {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        });
+                    });
             }
         }
     }
@@ -189,22 +197,15 @@ impl eframe::App for App {
 pub fn run() -> Result<(), String> {
     fn options(kind: renderer::Kind) -> eframe::NativeOptions {
         eframe::NativeOptions {
-            viewport: {
-                let mut vp = egui::ViewportBuilder::default()
-                    .with_inner_size([WIN_W, WIN_H])
-                    // Width is fixed: the layout is built for one width, and
-                    // only the height is the user's to change.
-                    .with_min_inner_size([WIN_W, 350.0])
-                    .with_max_inner_size([WIN_W, 4000.0])
-                    .with_maximize_button(false)
-                    .with_title(title());
-                // The exe resource covers Explorer and the taskbar; this is what
-                // puts the same picture in the title bar and Alt-Tab.
-                if let Some(ico) = icon::window_icon() {
-                    vp = vp.with_icon(ico);
-                }
-                vp
-            },
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([WIN_W, WIN_H])
+                // Width is fixed: the layout is built for one width, and
+                // only the height is the user's to change.
+                .with_min_inner_size([WIN_W, 350.0])
+                .with_max_inner_size([WIN_W, 4000.0])
+                .with_maximize_button(false)
+                .with_title(title())
+                .with_icon(icon::window_icon()),
             renderer: kind.renderer(),
             wgpu_options: kind.wgpu_options(),
             ..Default::default()

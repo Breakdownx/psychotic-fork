@@ -23,7 +23,7 @@ use ratatui::crossterm::event::{
     self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
@@ -40,6 +40,24 @@ const LOG_LIMIT: usize = 400;
 /// Below this the layout cannot hold the card, the list and the journal.
 const MIN_W: u16 = 50;
 const MIN_H: u16 = 18;
+
+// Paint both foreground and background so the same palette stays readable in
+// light and dark terminal profiles. Status colours retain their usual meaning.
+mod palette {
+    use ratatui::style::Color;
+
+    pub const BG: Color = Color::Rgb(24, 28, 37);
+    pub const SURFACE: Color = Color::Rgb(32, 38, 49);
+    pub const SELECTED: Color = Color::Rgb(44, 56, 72);
+    pub const TEXT: Color = Color::Rgb(230, 235, 243);
+    pub const MUTED: Color = Color::Rgb(166, 178, 197);
+    pub const BORDER: Color = Color::Rgb(111, 128, 151);
+    pub const CYAN: Color = Color::Rgb(105, 210, 225);
+    pub const VIOLET: Color = Color::Rgb(181, 161, 241);
+    pub const OK: Color = Color::Rgb(125, 211, 167);
+    pub const WARN: Color = Color::Rgb(239, 198, 120);
+    pub const ERROR: Color = Color::Rgb(245, 143, 151);
+}
 
 /// `--tui` (or `tui`, any number of dashes) anywhere on the command line.
 pub fn requested() -> bool {
@@ -714,7 +732,7 @@ impl App {
         let busy = self.busy.is_some();
         match row {
             Row::Action(a) => ListItem::new(Line::from(vec![
-                Span::styled("▶ ", Style::new().fg(Color::Cyan)),
+                Span::styled("▶ ", Style::new().fg(palette::CYAN)),
                 Span::styled(
                     a.label().to_string(),
                     Style::new().add_modifier(Modifier::BOLD),
@@ -745,15 +763,15 @@ impl App {
                 let (dot, color, what) = match (&r.path, r.patched) {
                     (None, _) => (
                         "○",
-                        Color::DarkGray,
+                        palette::MUTED,
                         "не найдено — Enter: указать путь".to_string(),
                     ),
                     (Some(p), patched) => (
                         "●",
                         match patched {
-                            Some(true) => Color::Green,
-                            Some(false) => Color::Gray,
-                            None => Color::DarkGray,
+                            Some(true) => palette::OK,
+                            Some(false) => palette::MUTED,
+                            None => palette::MUTED,
                         },
                         crate::utils::mask_path(&p.display().to_string()),
                     ),
@@ -768,7 +786,7 @@ impl App {
                     Span::raw("    "),
                     Span::styled(format!("{dot} "), Style::new().fg(color)),
                     Span::raw(format!("{}  ", r.label)),
-                    Span::styled(what, Style::new().fg(Color::DarkGray)),
+                    Span::styled(what, Style::new().fg(palette::MUTED)),
                     Span::styled(tail, Style::new().fg(color)),
                 ]))
             }
@@ -777,7 +795,7 @@ impl App {
                     "{} Настройки для опытных",
                     if self.advanced { "▾" } else { "▸" }
                 ),
-                Style::new().fg(Color::Gray),
+                Style::new().fg(palette::VIOLET),
             )),
             Row::Provider(i) => {
                 let Some(p) = self.status.as_ref().and_then(|s| s.providers.get(i)) else {
@@ -796,7 +814,7 @@ impl App {
                 };
                 ListItem::new(Line::from(vec![
                     Span::raw("      Свой DNS: "),
-                    Span::styled(shown, Style::new().fg(Color::Gray)),
+                    Span::styled(shown, Style::new().fg(palette::MUTED)),
                 ]))
             }
             Row::OwnProxyText => {
@@ -808,11 +826,11 @@ impl App {
                 };
                 ListItem::new(Line::from(vec![
                     Span::raw("      Адрес прокси: "),
-                    Span::styled(shown, Style::new().fg(Color::Gray)),
+                    Span::styled(shown, Style::new().fg(palette::MUTED)),
                 ]))
             }
             Row::Report => ListItem::new(Line::from(vec![
-                Span::styled("⎘ ", Style::new().fg(Color::Cyan)),
+                Span::styled("⎘ ", Style::new().fg(palette::CYAN)),
                 Span::raw("Сохранить отчёт"),
             ])),
         }
@@ -824,6 +842,10 @@ impl App {
 
     fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
+        f.render_widget(
+            Block::new().style(Style::new().fg(palette::TEXT).bg(palette::BG)),
+            area,
+        );
         if area.width < MIN_W || area.height < MIN_H {
             f.render_widget(
                 Paragraph::new(format!(
@@ -841,7 +863,7 @@ impl App {
     fn title_line(&self) -> Line<'static> {
         let mut spans = vec![Span::styled(
             format!(" Antigravity Unlocker 2 v{} ", update::current_version()),
-            Style::new().add_modifier(Modifier::BOLD),
+            Style::new().fg(palette::CYAN).add_modifier(Modifier::BOLD),
         )];
         if let Some(rel) = &self.update {
             spans.push(Span::styled(
@@ -850,7 +872,10 @@ impl App {
                     rel.display_version(),
                     update::RELEASES_LATEST_URL
                 ),
-                Style::new().fg(Color::Black).bg(Color::Yellow),
+                Style::new()
+                    .fg(palette::BG)
+                    .bg(palette::VIOLET)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         Line::from(spans)
@@ -885,12 +910,15 @@ impl App {
         ])
         .areas(area);
 
-        f.render_widget(Paragraph::new(self.title_line()), top);
+        f.render_widget(
+            Paragraph::new(self.title_line()).style(Style::new().bg(palette::SURFACE)),
+            top,
+        );
         self.draw_card(f, card, headline.as_ref());
         if vpn_h != 0 {
             f.render_widget(
                 Paragraph::new(status::VPN_TRAFFIC_NOTICE)
-                    .style(Style::new().fg(Color::Yellow))
+                    .style(Style::new().fg(palette::WARN))
                     .wrap(Wrap { trim: true }),
                 vpn,
             );
@@ -901,7 +929,12 @@ impl App {
         self.list.select(Some(at));
         let items: Vec<ListItem> = rows.iter().map(|r| self.row_item(*r, list.width)).collect();
         let list_widget = List::new(items)
-            .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+            .style(Style::new().fg(palette::TEXT).bg(palette::BG))
+            .highlight_style(
+                Style::new()
+                    .bg(palette::SELECTED)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("› ");
         f.render_stateful_widget(list_widget, list, &mut self.list);
 
@@ -909,7 +942,7 @@ impl App {
         let hint_text = selected.map(|r| self.row_hint(r)).unwrap_or_default();
         f.render_widget(
             Paragraph::new(hint_text)
-                .style(Style::new().fg(Color::DarkGray))
+                .style(Style::new().fg(palette::MUTED))
                 .wrap(Wrap { trim: true }),
             hint,
         );
@@ -925,17 +958,24 @@ impl App {
     fn draw_card(&self, f: &mut Frame, area: Rect, headline: Option<&status::Headline>) {
         let Some(h) = headline else {
             f.render_widget(
-                Paragraph::new("Проверяю систему…").block(Block::new().borders(Borders::ALL)),
+                Paragraph::new("Проверяю систему…")
+                    .style(Style::new().fg(palette::MUTED).bg(palette::SURFACE))
+                    .block(
+                        Block::new()
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
+                            .border_style(Style::new().fg(palette::CYAN)),
+                    ),
                 area,
             );
             return;
         };
         let color = match h.tone {
-            Tone::Ok => Color::Green,
-            Tone::Wait => Color::Cyan,
-            Tone::Fixing => Color::Yellow,
-            Tone::Action => Color::Red,
-            Tone::Off => Color::Gray,
+            Tone::Ok => palette::OK,
+            Tone::Wait => palette::CYAN,
+            Tone::Fixing => palette::WARN,
+            Tone::Action => palette::ERROR,
+            Tone::Off => palette::MUTED,
         };
         let mut lines = vec![Line::from(vec![
             Span::styled("● ", Style::new().fg(color)),
@@ -945,16 +985,19 @@ impl App {
         if let Some(what) = &self.busy {
             lines.push(Line::styled(
                 format!("⏳ {what}"),
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(palette::WARN),
             ));
         }
         f.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: true }).block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::new().fg(color)),
-            ),
+            Paragraph::new(lines)
+                .style(Style::new().fg(palette::TEXT).bg(palette::SURFACE))
+                .wrap(Wrap { trim: true })
+                .block(
+                    Block::new()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::new().fg(color)),
+                ),
             area,
         );
     }
@@ -962,8 +1005,8 @@ impl App {
     fn draw_journal(&self, f: &mut Frame, area: Rect) {
         let block = Block::new()
             .borders(Borders::TOP)
-            .title(Span::styled(" Журнал ", Style::new().fg(Color::Gray)))
-            .border_style(Style::new().fg(Color::DarkGray));
+            .title(Span::styled(" Журнал ", Style::new().fg(palette::VIOLET)))
+            .border_style(Style::new().fg(palette::BORDER));
         let inner = block.inner(area);
         f.render_widget(block, area);
         // Newest at the bottom; only as many as fit once wrapped.
@@ -981,11 +1024,11 @@ impl App {
             }
             used += h;
             let color = match level {
-                Level::Ok => Color::Green,
-                Level::Warn => Color::Yellow,
-                Level::Err => Color::Red,
-                Level::Step => Color::Cyan,
-                Level::Info => Color::Reset,
+                Level::Ok => palette::OK,
+                Level::Warn => palette::WARN,
+                Level::Err => palette::ERROR,
+                Level::Step => palette::CYAN,
+                Level::Info => palette::TEXT,
             };
             lines.push(Line::styled(shown, Style::new().fg(color)));
         }
@@ -997,7 +1040,7 @@ impl App {
         if let Some((text, at)) = &self.toast {
             if at.elapsed() < Duration::from_secs(6) {
                 f.render_widget(
-                    Paragraph::new(text.clone()).style(Style::new().fg(Color::Cyan)),
+                    Paragraph::new(text.clone()).style(Style::new().fg(palette::CYAN)),
                     area,
                 );
                 return;
@@ -1017,7 +1060,7 @@ impl App {
         };
         let keys = format!("↑↓ выбор · Пробел/Enter — вкл/выкл{offered}{report} · q — выход");
         f.render_widget(
-            Paragraph::new(keys).style(Style::new().fg(Color::DarkGray)),
+            Paragraph::new(keys).style(Style::new().fg(palette::MUTED)),
             area,
         );
     }
@@ -1063,29 +1106,33 @@ impl App {
             _ => text.clone(),
         };
         let mut lines = vec![
-            Line::styled(hint, Style::new().fg(Color::Gray)),
+            Line::styled(hint, Style::new().fg(palette::MUTED)),
             Line::raw(""),
             Line::from(vec![
                 Span::raw("› "),
                 Span::raw(shown),
-                Span::styled("▏", Style::new().fg(Color::Cyan)),
+                Span::styled("▏", Style::new().fg(palette::CYAN)),
             ]),
         ];
         if let Some(e) = error {
-            lines.push(Line::styled(e.to_string(), Style::new().fg(Color::Red)));
+            lines.push(Line::styled(e.to_string(), Style::new().fg(palette::ERROR)));
         }
         lines.push(Line::styled(
             "Enter — применить · Esc — отмена",
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(palette::MUTED),
         ));
         f.render_widget(Clear, popup);
         f.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .title(title),
-            ),
+            Paragraph::new(lines)
+                .style(Style::new().fg(palette::TEXT).bg(palette::SURFACE))
+                .wrap(Wrap { trim: false })
+                .block(
+                    Block::new()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::new().fg(palette::VIOLET))
+                        .title(Span::styled(title, Style::new().fg(palette::CYAN))),
+                ),
             popup,
         );
     }
@@ -1100,12 +1147,12 @@ fn switch_line(
     width: u16,
 ) -> ListItem<'static> {
     let (badge, color) = match state {
-        State::On => ("[вкл ]", Color::Green),
-        State::Partial(_) => ("[вкл~]", Color::Yellow),
-        State::Off | State::OffNote(_) => ("[выкл]", Color::DarkGray),
-        State::Blocked(_) => ("[ -- ]", Color::Yellow),
+        State::On => ("[вкл ]", palette::OK),
+        State::Partial(_) => ("[вкл~]", palette::WARN),
+        State::Off | State::OffNote(_) => ("[выкл]", palette::MUTED),
+        State::Blocked(_) => ("[ -- ]", palette::WARN),
     };
-    let color = if busy { Color::DarkGray } else { color };
+    let color = if busy { palette::MUTED } else { color };
     let mut spans = vec![
         Span::raw(indent.to_string()),
         Span::styled(badge, Style::new().fg(color)),
@@ -1124,9 +1171,9 @@ fn switch_line(
                 note.to_string()
             };
             let note_color = if matches!(state, State::Blocked(_)) {
-                Color::Yellow
+                palette::WARN
             } else {
-                Color::Gray
+                palette::MUTED
             };
             spans.push(Span::styled(
                 format!(" — {note}"),

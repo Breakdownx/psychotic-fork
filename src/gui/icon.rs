@@ -15,7 +15,16 @@ use eframe::egui;
 
 const ICON_W: u32 = 64;
 const ICON_H: u32 = 64;
-const ICON_RGBA: &[u8] = include_bytes!("../../assets/icon_64.rgba");
+const ICON_RGBA: &[u8; (ICON_W * ICON_H * 4) as usize] =
+    include_bytes!("../../assets/icon_64.rgba");
+
+pub fn unlocker_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    ctx.load_texture(
+        "unlocker",
+        egui::ColorImage::from_rgba_unmultiplied([ICON_W as usize, ICON_H as usize], ICON_RGBA),
+        egui::TextureOptions::LINEAR,
+    )
+}
 
 const ANTIGRAVITY_SIZE: usize = 48;
 const ANTIGRAVITY_RGBA: &[u8] = include_bytes!("../../assets/antigravity_48.rgba");
@@ -31,19 +40,13 @@ pub fn antigravity_image() -> Option<egui::ColorImage> {
     ))
 }
 
-/// The window icon, or `None` if the baked asset is not the size it claims.
-///
-/// Checked rather than trusted: a mismatched blob would have egui read past the
-/// end of it, and `panic = "abort"` turns that into a window that never opens.
-pub fn window_icon() -> Option<egui::IconData> {
-    if ICON_RGBA.len() != (ICON_W * ICON_H * 4) as usize {
-        return None;
-    }
-    Some(egui::IconData {
+/// The embedded array checks the RGBA size at compile time.
+pub fn window_icon() -> egui::IconData {
+    egui::IconData {
         rgba: ICON_RGBA.to_vec(),
         width: ICON_W,
         height: ICON_H,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -52,9 +55,7 @@ mod tests {
 
     #[test]
     fn the_baked_icon_is_the_size_it_claims() {
-        // Guards the regeneration step: an asset re-exported at another size
-        // would otherwise fail silently, as a window with no icon.
-        let icon = window_icon().expect("the icon asset must match ICON_W x ICON_H");
+        let icon = window_icon();
         assert_eq!(icon.width, ICON_W);
         assert_eq!(icon.height, ICON_H);
         assert_eq!(icon.rgba.len(), (ICON_W * ICON_H * 4) as usize);

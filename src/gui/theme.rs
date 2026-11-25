@@ -11,6 +11,7 @@ pub struct Palette {
     pub text: Color32,
     pub muted: Color32,
     pub accent: Color32,
+    pub violet: Color32,
     pub accent_text: Color32,
     pub on_accent: Color32,
     pub soft: Color32,
@@ -24,37 +25,39 @@ const fn rgb(hex: u32) -> Color32 {
 }
 
 const LIGHT: Palette = Palette {
-    bg: rgb(0xfbfcfe),
-    chrome: rgb(0xeef1f5),
-    card: rgb(0xf0f4f8),
-    sunken: rgb(0xffffff),
-    line: rgb(0xdce2ea),
-    text: rgb(0x242a35),
-    muted: rgb(0x586474),
-    accent: rgb(0x245d98),
-    accent_text: rgb(0x145ca1),
+    bg: rgb(0xeef2f6),
+    chrome: rgb(0xf9fbfd),
+    card: rgb(0xffffff),
+    sunken: rgb(0xf3f6fa),
+    line: rgb(0xc8d3de),
+    text: rgb(0x192534),
+    muted: rgb(0x516374),
+    accent: rgb(0x006879),
+    violet: rgb(0x7052a5),
+    accent_text: rgb(0x006575),
     on_accent: rgb(0xffffff),
-    soft: rgb(0xe1eefb),
+    soft: rgb(0xd4ecf0),
     ok: rgb(0x257346),
     warn: rgb(0x875018),
     bad: rgb(0xa22b34),
 };
 
 const DARK: Palette = Palette {
-    bg: rgb(0x24272f),
-    chrome: rgb(0x1e2129),
-    card: rgb(0x2d323d),
-    sunken: rgb(0x222630),
-    line: rgb(0x3c424e),
-    text: rgb(0xf0f3fa),
-    muted: rgb(0xb1bdce),
-    accent: rgb(0xa8d4ff),
-    accent_text: rgb(0x9cd0ff),
-    on_accent: rgb(0x102842),
-    soft: rgb(0x273c51),
-    ok: rgb(0xa6dfb1),
-    warn: rgb(0xf5c48c),
-    bad: rgb(0xffaaa9),
+    bg: rgb(0x0e121a),
+    chrome: rgb(0x151a25),
+    card: rgb(0x191f2b),
+    sunken: rgb(0x101620),
+    line: rgb(0x354052),
+    text: rgb(0xecf3fc),
+    muted: rgb(0xa7b7c9),
+    accent: rgb(0x69e4ee),
+    violet: rgb(0xac96f6),
+    accent_text: rgb(0x7fe9f1),
+    on_accent: rgb(0x10232a),
+    soft: rgb(0x203b47),
+    ok: rgb(0x7ae0ad),
+    warn: rgb(0xf6c681),
+    bad: rgb(0xff9da7),
 };
 
 pub fn palette(ui: &egui::Ui) -> &'static Palette {
@@ -139,7 +142,8 @@ pub fn apply(ctx: &egui::Context) {
         (egui::Theme::Light, &LIGHT, egui::Visuals::light()),
     ] {
         visuals.panel_fill = colors.bg;
-        visuals.window_fill = colors.bg;
+        visuals.window_fill = colors.card;
+        visuals.window_stroke = Stroke::new(1.0, colors.line);
         visuals.extreme_bg_color = colors.sunken;
         visuals.faint_bg_color = colors.card;
         visuals.override_text_color = Some(colors.text);
@@ -170,7 +174,7 @@ pub fn apply(ctx: &egui::Context) {
     ctx.all_styles_mut(|style| {
         use egui::{FontFamily::Proportional, FontId, TextStyle};
         style.text_styles = [
-            (TextStyle::Heading, FontId::new(21.0, Proportional)),
+            (TextStyle::Heading, FontId::new(24.0, Proportional)),
             (TextStyle::Body, FontId::new(14.5, Proportional)),
             (TextStyle::Button, FontId::new(14.5, Proportional)),
             (TextStyle::Small, FontId::new(12.5, Proportional)),

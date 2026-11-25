@@ -13,6 +13,32 @@ pub const FOLDER: &str = "\u{e246}";
 pub const REPAIR: &str = "\u{e1b0}";
 pub const REFRESH: &str = "\u{e148}";
 
+/// A restrained reflected edge, shared by the graphite surfaces.
+fn satin_edge(ui: &egui::Ui, rect: egui::Rect, inset: f32, enabled: bool) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let alpha = match (ui.visuals().dark_mode, enabled) {
+        (true, true) => 65,
+        (true, false) => 25,
+        (false, true) => 150,
+        (false, false) => 70,
+    };
+    let reflection = if ui.visuals().dark_mode {
+        let violet = theme::palette(ui).violet;
+        egui::Color32::from_rgba_unmultiplied(violet.r(), violet.g(), violet.b(), alpha)
+    } else {
+        egui::Color32::from_white_alpha(alpha)
+    };
+    ui.painter().line_segment(
+        [
+            egui::pos2(rect.left() + inset, rect.top() + 1.5),
+            egui::pos2(rect.right() - inset, rect.top() + 1.5),
+        ],
+        Stroke::new(1.0, reflection),
+    );
+}
+
 pub fn icon_text(icon: &str, label: &str, color: egui::Color32) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     job.append(
@@ -38,7 +64,9 @@ pub fn command(
     enabled: bool,
 ) -> egui::Response {
     let colors = theme::palette(ui);
-    let (ink, fill, border) = if highlighted {
+    let (ink, fill, border) = if !enabled {
+        (colors.muted, colors.sunken, colors.line)
+    } else if highlighted {
         (colors.on_accent, colors.accent, colors.accent)
     } else {
         (colors.text, colors.sunken, colors.line)
@@ -48,13 +76,15 @@ pub fn command(
         egui::Button::new(icon_text(icon, label, ink))
             .fill(fill)
             .stroke(Stroke::new(1.0, border))
+            .corner_radius(CornerRadius::same(theme::RADIUS_SMALL))
             .min_size(egui::vec2(0.0, 32.0)),
     );
+    satin_edge(ui, response.rect, 7.0, enabled);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
     response
 }
 
-/// An iOS-style on/off switch.
+/// A compact on/off switch with a satin track and inset thumb.
 ///
 /// Every capability in this tool is a switch: flipping it off *undoes* the
 /// thing rather than hiding a menu item (the old build had separate "disable"
@@ -97,17 +127,30 @@ pub fn switch(ui: &mut egui::Ui, on: &mut bool, enabled: bool, label: &str) -> e
 
         let painter = ui.painter();
         painter.rect_filled(rect, CornerRadius::same(11), track);
-        if !*on {
-            painter.rect_stroke(
-                rect,
-                CornerRadius::same(11),
-                Stroke::new(1.0, colors.muted),
-                egui::StrokeKind::Inside,
-            );
-        }
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(11),
+            Stroke::new(
+                1.0,
+                if *on && enabled {
+                    colors.accent_text
+                } else if !*on {
+                    colors.muted
+                } else {
+                    colors.line
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
+        satin_edge(ui, rect, 9.0, enabled);
         let r = rect.height() / 2.0 - 3.0;
         let cx = egui::lerp((rect.left() + r + 3.0)..=(rect.right() - r - 3.0), how);
         painter.circle_filled(egui::pos2(cx, rect.center().y), r, knob);
+        painter.circle_stroke(
+            egui::pos2(cx, rect.center().y),
+            r,
+            Stroke::new(0.75, colors.line),
+        );
     }
 
     if enabled {
@@ -157,7 +200,7 @@ pub fn switch_row(
 
 /// A titled block. Everything on the main screen lives in one of these.
 pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    egui::Frame::new()
+    let shown = egui::Frame::new()
         .fill(theme::palette(ui).card)
         .corner_radius(CornerRadius::same(theme::RADIUS))
         .inner_margin(egui::Margin::same(14))
@@ -167,12 +210,14 @@ pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
             // contents, a short one sits visibly narrower than its neighbour.
             ui.set_min_width(ui.available_width());
             add(ui)
-        })
-        .inner
+        });
+    satin_edge(ui, shown.response.rect, f32::from(theme::RADIUS), true);
+    shown.inner
 }
 
 /// The one filled button per screen — the action the user came to press.
 pub fn primary(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
+    let colors = theme::palette(ui);
     let btn = egui::Button::new(
         egui::RichText::new(text)
             .color(if enabled {
@@ -183,14 +228,24 @@ pub fn primary(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
             .size(15.0),
     )
     .fill(if enabled {
-        theme::palette(ui).accent
+        colors.accent
     } else {
-        theme::palette(ui).sunken
+        colors.sunken
     })
+    .stroke(Stroke::new(
+        1.0,
+        if enabled {
+            colors.accent_text
+        } else {
+            colors.line
+        },
+    ))
     .corner_radius(CornerRadius::same(theme::RADIUS_SMALL))
     .min_size(egui::vec2(0.0, 34.0));
 
-    ui.add_enabled(enabled, btn)
+    let response = ui.add_enabled(enabled, btn);
+    satin_edge(ui, response.rect, 7.0, enabled);
+    response
 }
 
 /// A quiet outlined button: everything that is not *the* action.
@@ -199,7 +254,9 @@ pub fn ghost(ui: &mut egui::Ui, text: &str) -> egui::Response {
         .fill(theme::palette(ui).sunken)
         .stroke(Stroke::new(1.0, theme::palette(ui).line))
         .corner_radius(CornerRadius::same(theme::RADIUS_SMALL));
-    ui.add(btn)
+    let response = ui.add(btn);
+    satin_edge(ui, response.rect, 7.0, ui.is_enabled());
+    response
 }
 
 /// Small grey explanatory text — the line under a switch that says what it does.
@@ -215,6 +272,8 @@ pub fn hint(ui: &mut egui::Ui, text: &str) {
 pub fn dot(ui: &mut egui::Ui, color: egui::Color32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), Sense::hover());
     if ui.is_rect_visible(rect) {
+        let halo = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 35);
+        ui.painter().circle_filled(rect.center(), 5.0, halo);
         ui.painter().circle_filled(rect.center(), 4.0, color);
     }
 }

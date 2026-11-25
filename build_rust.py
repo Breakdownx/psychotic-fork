@@ -1046,9 +1046,7 @@ def build_macos_bundle(version):
 
         with open(os.path.join(bundle, "Запустить.command"), "w", encoding="utf-8", newline="\n") as f:
             f.write(MACOS_LAUNCHER)
-        readme = "README.md"
-        if os.path.exists(readme):
-            shutil.copy2(readme, os.path.join(bundle, "README.md"))
+        shutil.copy2(os.path.join("macos", "README.md"), os.path.join(bundle, "README.md"))
 
         tar_path = bundle + ".tar.gz"
         if os.path.exists(tar_path):
