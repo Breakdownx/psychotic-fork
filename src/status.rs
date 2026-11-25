@@ -30,7 +30,7 @@ pub fn requested() -> bool {
 /// install found is fully patched, 1 when one is not, 2 when none was found.
 pub fn run() -> i32 {
     let settings = crate::settings::Settings::load();
-    say!("Antigravity Unlocker {}", env!("CARGO_PKG_VERSION"));
+    say!("Antigravity Unlocker {}", crate::update::current_version());
     say!();
 
     let mut installs: Vec<PathBuf> = settings.manual_paths.clone();

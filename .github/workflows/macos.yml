@@ -52,16 +52,23 @@ jobs:
 
       # Before the ten-minute build, not after it: a tag that disagrees with
       # Cargo.toml would publish a binary that calls itself another version.
+      #
+      # Two shapes: v2.35.1 - the release that goes with Antigravity 2.35.1,
+      # the version in Cargo.toml - and v2.35.1_1, _2, ... - fixes of the
+      # unlocker in between, Cargo.toml unchanged. The full version reaches the
+      # binary (window title, update check) through AG_FULL_VERSION (build.rs).
       - name: Tag matches the version
         if: startsWith(github.ref, 'refs/tags/v') || inputs.release != ''
         env:
           TAG: ${{ inputs.release != '' && inputs.release || github.ref_name }}
         run: |
           VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          if [ "$TAG" != "v$VER" ]; then
-            echo "::error::Тег $TAG не совпадает с версией $VER из Cargo.toml. Поднимите version в Cargo.toml (и Cargo.lock) или поставьте тег v$VER."
+          FULL=${TAG#v}
+          if [ "$FULL" != "$VER" ] && ! [[ "$FULL" =~ ^${VER//./\\.}_[0-9]+$ ]]; then
+            echo "::error::Тег $TAG не подходит к версии $VER из Cargo.toml: нужен v$VER или v${VER}_<число> (например v${VER}_1). Для новой версии Antigravity поднимите version в Cargo.toml (и Cargo.lock)."
             exit 1
           fi
+          echo "AG_FULL_VERSION=$FULL" >> "$GITHUB_ENV"
 
       - name: Toolchain
         run: |

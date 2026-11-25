@@ -8,6 +8,11 @@
 #   macos/build.sh --arm64-only    one slice, for a quicker local build
 #   macos/build.sh --skip-build    reuse the last release binaries
 #
+# Version: Cargo.toml's, the one that goes with the Antigravity release of the
+# same number. A fix of the unlocker in between is 2.35.1_1, _2, ...: set
+# AG_FULL_VERSION=2.35.1_1 (CI does, from the tag); Cargo.toml stays 2.35.1,
+# and the binary shows and compares the full version (build.rs, update.rs).
+#
 # Signed ad hoc: Gatekeeper asks once on first launch of a downloaded copy.
 # Developer ID signing and notarization are the manual steps in
 # docs/обновление-antigravity.md («Выпуск для Mac»).
@@ -32,9 +37,15 @@ while [ $# -gt 0 ]; do
 done
 
 VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-# A 4th-digit build 2.28.2.1 is named with an underscore before the 4th number,
-# matching the other platforms' assets.
-ASSET_VER=$(printf '%s' "$VER" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)$/\1_\2/')
+FULL_VER=${AG_FULL_VERSION:-$VER}
+if [ "$FULL_VER" != "$VER" ] && ! [[ "$FULL_VER" =~ ^${VER//./\\.}_[0-9]+$ ]]; then
+  echo "AG_FULL_VERSION=$FULL_VER does not fit Cargo.toml's $VER: use $VER or ${VER}_<n>" >&2
+  exit 2
+fi
+export AG_FULL_VERSION=$FULL_VER
+ASSET_VER=$FULL_VER
+# The bundle's machine-readable version is dotted: 2.35.1_1 -> 2.35.1.1.
+BUNDLE_VER=${FULL_VER//_/.}
 if [ ${#TARGETS[@]} -gt 1 ]; then ARCH_TAG=universal; else ARCH_TAG=arm64; fi
 NAME="AG_${ASSET_VER}_macos"
 APP_NAME="Antigravity Unlocker.app"
@@ -94,7 +105,9 @@ APP="$STAGE/$APP_NAME"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/ag_unlocker"
 chmod +x "$APP/Contents/MacOS/ag_unlocker"
-sed "s/__VERSION__/$VER/g" macos/Info.plist > "$APP/Contents/Info.plist"
+sed -e "s/__VERSION__/$VER/g" -e "s/__BUILD__/$BUNDLE_VER/g" \
+  macos/Info.plist > "$APP/Contents/Info.plist"
+plutil -lint -s "$APP/Contents/Info.plist"
 cp macos/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 sign "$APP"
 codesign --verify --strict --verbose=1 "$APP"
@@ -121,7 +134,7 @@ hdiutil create -quiet -volname "$VOLUME" -srcfolder "$DMG_ROOT" -fs HFS+ \
   -format UDZO -ov "$OUT/$DMG"
 hdiutil verify -quiet "$OUT/$DMG"
 
-echo "version=$VER"
+echo "version=$FULL_VER"
 echo "name=$NAME"
 echo "tgz=$OUT/$NAME.tar.gz"
 echo "app_zip=$OUT/$APP_ZIP"
