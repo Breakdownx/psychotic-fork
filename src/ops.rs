@@ -223,6 +223,11 @@ pub struct Status {
     /// at all. Reported, never acted on: the stand-down decision is still the
     /// client's (D13, P34).
     pub relay_egress: Option<crate::egress::ClientEgress>,
+    /// macOS only: an install was found unpatched and its binary cannot be
+    /// written because the `.app` bundle is App-Management protected. The card
+    /// says what to do about it instead of the bare "пропатчены не все
+    /// установки"; always false off macOS.
+    pub patch_blocked: bool,
 }
 
 impl Status {
@@ -289,9 +294,7 @@ pub enum Event {
 
 /// UI → worker.
 pub enum Cmd {
-    /// The key was accepted and the main screen is up. Auto-patch may act from
-    /// here on, never before: the first scan runs under the licence screen, and
-    /// patching from there would hand the patch to anyone without a key.
+    /// The UI accepted a licence key. Auto-patch may now act on the initial scan.
     Unlocked,
     /// Store the licence key just accepted, so the next start skips the screen.
     RememberLicense(String),
@@ -472,9 +475,7 @@ fn run_worker(
     settle_decline(&mut ctx);
     startup_housekeeping(&mut ctx);
 
-    // The first snapshot is deep: the window opens on the licence screen, so
-    // reading the binaries costs the user nothing here and the main screen is
-    // already truthful when it appears.
+    // Inspect installed binaries before reporting their initial patch status.
     push_status(&mut ctx, Scan::Deep);
 
     while let Ok(cmd) = rx.recv() {
@@ -493,8 +494,7 @@ fn run_worker(
                 }
             }
             Cmd::Unlocked => {
-                // The first snapshot was taken while the licence screen was up;
-                // a fresh one either way, deep when auto-patch just wrote.
+                // Re-read binary patch status if auto-patch changed an install.
                 if auto_patch_found(&mut ctx) {
                     push_status(&mut ctx, Scan::Deep);
                 } else {
@@ -927,6 +927,13 @@ fn on_off(v: bool) -> State {
     }
 }
 
+/// The switch note when a macOS `.app` install cannot be patched because macOS
+/// App Management refuses the write. Short on purpose — it sits under the
+/// «Разблокировка входа» switch at 12 px; the status card carries the full
+/// steps.
+const APP_MGMT_SWITCH_NOTE: &str =
+    "macOS не даёт изменить Antigravity — включите «Управление приложениями»";
+
 fn read_status(ctx: &mut Ctx, deep: bool) -> Status {
     let admin = is_admin();
 
@@ -958,6 +965,23 @@ fn read_status(ctx: &mut Ctx, deep: bool) -> Status {
         });
     ctx.dns_probe = dns_probe;
 
+    // macOS: an install left unpatched because its `.app` bundle is
+    // App-Management protected is the one case where "пропатчены не все
+    // установки" is a dead end — the button that patches it fails the same way.
+    // Detect it so the card and the switch can say what macOS actually wants,
+    // probing only the installs that are still unpatched.
+    #[cfg(target_os = "macos")]
+    let patch_blocked = installs.iter().any(|r| {
+        r.patched == Some(false)
+            && r.path.as_deref().is_some_and(|p| {
+                crate::patch_binary::binary_targets(p)
+                    .iter()
+                    .any(|t| crate::macos::write_blocked_by_app_management(t))
+            })
+    });
+    #[cfg(not(target_os = "macos"))]
+    let patch_blocked = false;
+
     let patched: Vec<bool> = installs.iter().filter_map(|i| i.patched).collect();
     let client_patch = if patched.is_empty() {
         // Not inspected yet, or nothing found. Fall back to what the user asked
@@ -970,7 +994,13 @@ fn read_status(ctx: &mut Ctx, deep: bool) -> Status {
     } else if patched.iter().all(|p| *p) {
         State::On
     } else if patched.iter().any(|p| *p) {
-        State::Partial("пропатчены не все установки".into())
+        // Some patched, some not: still "on-ish", so the switch stays on, but the
+        // note names the real blocker when there is one.
+        State::Partial(if patch_blocked { APP_MGMT_SWITCH_NOTE } else { "пропатчены не все установки" }.into())
+    } else if patch_blocked {
+        // None patched and the write is refused: off, but with the reason, so the
+        // switch is not a silent dead end.
+        State::OffNote(APP_MGMT_SWITCH_NOTE.into())
     } else {
         State::Off
     };
@@ -1002,6 +1032,7 @@ fn read_status(ctx: &mut Ctx, deep: bool) -> Status {
         relay_egress: ctx.relay_egress,
         providers: Vec::new(),
         installs,
+        patch_blocked,
     }
     .with_settings_switches(&ctx.settings)
 }
@@ -2635,6 +2666,7 @@ mod tests {
             rules: false,
             providers: Vec::new(),
             relay_egress: None,
+            patch_blocked: false,
         }
     }
 

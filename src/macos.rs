@@ -146,6 +146,45 @@ pub fn app_management_hint(path: &Path, err: &str) -> String {
     }
 }
 
+/// Whether macOS App Management (TCC) would refuse a write to `target`, probed
+/// without touching the target itself.
+///
+/// The patch writes its temp beside the target (`temp_path`), so the one thing
+/// that decides whether the patch can land is whether this process may create a
+/// file in that directory. For a binary inside a signed `.app` bundle macOS
+/// gates that behind the App Management entitlement, and an unlocker launched
+/// from Finder (reparented to launchd) does not inherit the grant a Terminal
+/// with App Management has — the write then fails with EPERM. A probe file is
+/// created and removed at once; only a genuine "Operation not permitted" counts,
+/// so an ordinary writable bundle (or a missing dir) reads as not blocked.
+///
+/// Read-only in effect and bundle-scoped: a target outside a `.app` is never
+/// probed, so the CLI in `~/.local/bin` and Linux installs always read false.
+pub fn write_blocked_by_app_management(target: &Path) -> bool {
+    if bundle_of(target).is_none() {
+        return false;
+    }
+    let Some(dir) = target.parent() else {
+        return false;
+    };
+    let probe = dir.join(format!(".agwrite_probe_{}", std::process::id()));
+    match fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            false
+        }
+        Err(e) => {
+            let s = e.to_string();
+            s.contains("Operation not permitted") || s.contains("os error 1)")
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // launchd
 // ---------------------------------------------------------------------------

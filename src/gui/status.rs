@@ -136,6 +136,10 @@ pub struct Facts {
     pub overloaded: Option<(Duration, String)>,
     /// The newest 401 in the last ten minutes: how long ago, and how many.
     pub unauthorized: Option<(Duration, usize)>,
+    /// macOS only: an install is unpatched and its `.app` bundle refuses the
+    /// write (App Management). The card then says what to grant instead of
+    /// offering a patch button that fails the same way. Always false elsewhere.
+    pub patch_blocked: bool,
 }
 
 /// One 401 can be a token refreshed a moment late; a credential Google stopped
@@ -246,6 +250,7 @@ impl Facts {
                 .as_ref()
                 .map(|o| (aged(o.ago), o.model.clone())),
             unauthorized: gate.unauthorized.map(|u| (aged(u.ago), u.count)),
+            patch_blocked: s.patch_blocked,
         }
     }
 }
@@ -525,6 +530,24 @@ pub fn headline(f: &Facts) -> Headline {
         };
     }
 
+    // macOS put the install behind App Management and the write is refused: the
+    // one reason "Включить всё" keeps leaving the client unpatched. Said with the
+    // step that actually fixes it, above the generic "включено не всё" so the
+    // button is not a loop. The button stays so a retry after granting is one
+    // click away.
+    if f.patch_blocked {
+        return Headline {
+            tone: Tone::Action,
+            title: "macOS не даёт пропатчить Antigravity".into(),
+            detail: "Antigravity стоит в защищённой папке, и macOS не даёт анлокеру изменить его \
+                     файлы. Откройте «Системные настройки» → «Конфиденциальность и безопасность» → \
+                     «Управление приложениями» и включите там программу, из которой запущен анлокер \
+                     (обычно Терминал), затем нажмите «Включить всё»."
+                .into(),
+            action: Some(Action::EnableAll),
+        };
+    }
+
     if !f.patch_on || !f.bypass_on {
         let what = match (f.patch_on, f.bypass_on) {
             (false, false) => "Разблокировка входа и обход ошибки 400 выключены.",
@@ -767,6 +790,24 @@ mod tests {
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
+    }
+
+    /// macOS App Management refusing the write must not read as a plain "включено
+    /// не всё": the card has to name the grant, or the patch button just loops.
+    #[test]
+    fn an_app_management_block_names_the_fix() {
+        let f = Facts {
+            patch_blocked: true,
+            ..working()
+        };
+        let h = headline(&f);
+        assert_eq!(h.tone, Tone::Action);
+        assert!(
+            h.detail.contains("Управление приложениями"),
+            "{}",
+            h.detail
+        );
+        assert_eq!(h.action, Some(Action::EnableAll));
     }
 
     /// G50, the report that started this: a refusal, then quiet. Quiet is not
