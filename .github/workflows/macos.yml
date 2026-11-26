@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: "Publish the build as the GitHub release for this tag (e.g. v2.35.1). Empty = workflow artifact only."
+        description: "Publish the build as the GitHub release for this tag (e.g. v2.35.2). Empty = workflow artifact only."
         required: false
         default: ""
 
@@ -101,6 +101,12 @@ jobs:
             ${{ steps.pack.outputs.tgz }}
           if-no-files-found: error
 
+      # The Windows workflow attaches its exe to the same release, and either
+      # may come first: whichever finds no release creates it, empty and with
+      # the shared notes (.github/release-notes.md), and each then uploads its
+      # own files. Created empty because a create with files is a draft until
+      # the upload ends - invisible to the other workflow, which would make a
+      # second one.
       - name: Publish the release
         # On a tag push, or when a tag was given to workflow_dispatch. Creates the
         # release when the tag has none yet, otherwise replaces its files.
@@ -110,16 +116,10 @@ jobs:
           TAG: ${{ inputs.release != '' && inputs.release || github.ref_name }}
           VERSION: ${{ steps.pack.outputs.version }}
         run: |
-          files=("${{ steps.pack.outputs.dmg }}" "${{ steps.pack.outputs.app_zip }}" "${{ steps.pack.outputs.tgz }}")
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
-          else
-            gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "Antigravity Unlocker $VERSION" \
-              --notes "Mac (Apple Silicon и Intel), macOS 13 или новее.
-
-          **Установка:** скачайте \`Psychotic_AG_Fork.dmg\`, откройте его и перетащите Antigravity Unlocker в «Программы». Первый запуск и право «Управление приложениями» описаны в README внутри образа.
-
-          Также: \`…_app-local.zip\` — то же приложение в zip; \`…_macos.tar.gz\` — запасной вариант с \`Запустить.command\`."
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "Antigravity Unlocker $VERSION" --notes-file .github/release-notes.md \
+              || echo "[INFO] Релиз $TAG не создан - вероятно, его только что создал workflow Windows. Добавляю файлы."
           fi
+          gh release upload "$TAG" "${{ steps.pack.outputs.dmg }}" "${{ steps.pack.outputs.app_zip }}" "${{ steps.pack.outputs.tgz }}" \
+            --clobber --repo "$GITHUB_REPOSITORY"

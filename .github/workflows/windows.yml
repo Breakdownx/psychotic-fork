@@ -2,9 +2,8 @@ name: Windows
 
 # Builds the Windows exe, checks the file that came out, and attaches it to the
 # run as a workflow artifact - on every push and pull request, and on demand.
-#
-# Nothing is published here: the macOS workflow owns the GitHub releases, and
-# the exe is meant to be downloaded from this run's "Artifacts" section.
+# On a tag (v*), or by hand with a tag given, the tested exe also goes to the
+# GitHub release of that tag, next to the macOS files (macos.yml).
 
 on:
   push:
@@ -12,9 +11,15 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Attach the exe to the GitHub release for this tag (e.g. v2.35.2). Empty = workflow artifact only."
+        required: false
+        default: ""
 
 permissions:
-  contents: read
+  # contents: write for the release step only; nothing else writes.
+  contents: write
 
 defaults:
   run:
@@ -49,7 +54,7 @@ jobs:
       - name: Version
         id: ver
         env:
-          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          TAG: ${{ inputs.release != '' && inputs.release || (github.ref_type == 'tag' && github.ref_name || '') }}
         run: |
           $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' -List).Matches[0].Groups[1].Value
           $full = $cargo
@@ -216,3 +221,26 @@ jobs:
           # the tests would run against a different CRT than the exe ships with.
           RUSTFLAGS: -D warnings -C target-feature=+crt-static
         run: cargo test --locked --bin ag_unlocker --target x86_64-pc-windows-msvc
+
+      # Only a tested exe reaches a release, hence after Test. The macOS and
+      # Windows workflows of one tag run side by side and either may come
+      # first: whichever finds no release creates it, empty and with the shared
+      # notes (.github/release-notes.md), and each then uploads its own files.
+      # Created empty because a create with files is a draft until the upload
+      # ends - invisible to the other workflow, which would make a second one.
+      - name: Publish to the release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release != '' && inputs.release || github.ref_name }}
+          VERSION: ${{ steps.ver.outputs.full }}
+        run: |
+          gh release view $env:TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:TAG --repo $env:GITHUB_REPOSITORY --verify-tag `
+              --title "Antigravity Unlocker $env:VERSION" --notes-file .github/release-notes.md
+            if ($LASTEXITCODE -ne 0) {
+              Write-Output "[INFO] Релиз $env:TAG не создан - вероятно, его только что создал workflow macOS. Добавляю файл."
+            }
+          }
+          gh release upload $env:TAG (Join-Path dist '${{ steps.ver.outputs.exe }}') --clobber --repo $env:GITHUB_REPOSITORY

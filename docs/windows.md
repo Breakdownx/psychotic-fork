@@ -1,8 +1,8 @@
 # Windows — диагностика и восстановление
 
-В релизах опубликованы пакеты только для Mac: их собирает [workflow macOS](../.github/workflows/macos.yml). Сборку для Windows выполняет отдельный [workflow Windows](../.github/workflows/windows.yml) — на каждый push и pull request, а также по кнопке **Run workflow** на вкладке Actions. Он собирает `AG_<версия>.exe` статически слинкованным с CRT, прогоняет тесты, проверяет готовый файл (ему не нужен VCRUNTIME140.dll, он отвечает на `--version` и `--status`) и прикладывает его к запуску.
+EXE для Windows публикуется в каждом [релизе форка](https://github.com/Breakdownx/psychotic-fork/releases/latest) рядом с пакетами для Mac под именем `AG_<версия>.exe`. Его собирает отдельный [workflow Windows](../.github/workflows/windows.yml). EXE статически слинкован с CRT, поэтому ему не нужен VCRUNTIME140.dll. Перед публикацией CI проверяет, что готовый файл отвечает на `--version` и `--status`, и прогоняет тесты.
 
-Готовый EXE скачивается из раздела **Artifacts** нужного запуска: архив `AG_<версия>_windows` содержит сам файл и отчёты `ag-version.txt` и `ag-status.txt`, снятые на раннере. Релиз для Windows не публикуется.
+Тот же workflow запускается на каждый push и pull request, а также по кнопке **Run workflow** на вкладке Actions. Сборки без релиза скачиваются из раздела **Artifacts** нужного запуска: архив `AG_<версия>_windows` содержит EXE и отчёты `ag-version.txt` и `ag-status.txt`, снятые на раннере.
 
 ## Получить отчёт в PowerShell
 
