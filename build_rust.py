@@ -1089,7 +1089,7 @@ def main():
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     print("[INFO] Starting build process...")
 
-    VERSION = "2.35.1"
+    VERSION = "2.35.2"
     version = VERSION
     # The Cargo package version has three components; release names can also
     # carry a build number, e.g. 2.9.1_14.
