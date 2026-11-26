@@ -10,3 +10,7 @@ __pycache__/
 # Build output of macos/build.sh. Releases are published by CI
 # (.github/workflows/macos.yml), not committed.
 /release/
+
+# Where the CI workflows stage what they upload (macos/build.sh --out dist,
+# the Windows exe and its check reports).
+/dist/

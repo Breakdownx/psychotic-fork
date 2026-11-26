@@ -33,6 +33,8 @@ Desktop, IDE и CLI обновляются независимо. При вклю
 | macOS и Linux | `~/.local/share/agunlocker/watchdog.log`. При заданной непустой `XDG_DATA_HOME` — `$XDG_DATA_HOME/agunlocker/watchdog.log`. |
 | Windows | `%LOCALAPPDATA%\AGUnlocker\watchdog.log` |
 
+Команды PowerShell для чтения журнала и сохранения отчёта приведены в [руководстве для Windows](windows.md).
+
 Служба создаёт журнал при первой записи и ограничивает его размер. Для разбора сбоя сохраните название клиента, версии клиента и анлокера, ОС, время, точный текст ошибки и строки за этот период.
 
 ## Как вернуться к штатной установке
@@ -93,3 +95,29 @@ lipo -archs "$app/Contents/MacOS/ag_unlocker"
 ```
 
 Для универсального пакета `lipo` должен вывести обе архитектуры, `arm64` и `x86_64`. Если нужен выпуск с удостоверением разработчика Apple, это отдельный процесс с подписью Developer ID Application, отправкой через `notarytool` и прикреплением билета. Для такой сборки проверьте извлечённое приложение командами `xcrun stapler validate "$app"` и `spctl --assess --type execute --verbose=4 "$app"`. [Нотарификация приложений в документации Apple](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
+
+## Сборка для Windows
+
+Версия и теги подчиняются тем же правилам, что и для Mac: `v2.35.1` для версии из `Cargo.toml`, `v2.35.1_1` и далее для исправлений анлокера. Тег другого вида останавливает сборку до компиляции.
+
+### Локальная сборка
+
+Нужны Rust, установленный через rustup, и Visual Studio Build Tools с компонентом «Разработка классических приложений на C++». В PowerShell из корня репозитория выполните
+
+```powershell
+rustup target add x86_64-pc-windows-msvc
+cargo build --release --locked --bin ag_unlocker --target x86_64-pc-windows-msvc
+```
+
+Готовый файл появится в `target\x86_64-pc-windows-msvc\release\ag_unlocker.exe`. Для сборки исправления перед `cargo build` задайте полную версию: `$env:AG_FULL_VERSION = '2.35.1_1'`.
+
+Не задавайте `RUSTFLAGS` для этой сборки. Переменная заменяет флаги таргета из [`.cargo/config.toml`](../.cargo/config.toml), и EXE теряет статически слинкованный CRT. На чистой Windows 10 такой файл не запускается с ошибкой «VCRUNTIME140.dll не найден». Если `RUSTFLAGS` всё же нужна, добавьте в неё `-C target-feature=+crt-static`.
+
+### GitHub Actions
+
+- При пуше в `main`, в pull request, при пуше тега `v*` и при ручном запуске workflow собирает EXE для x86-64 и называет его по полной версии: `AG_<версия>.exe`.
+- Затем CI проверяет готовый файл. EXE должен весить больше 2 МБ и не требовать VCRUNTIME140.dll. Запуск с `--version` должен вернуть код 0 с версией и канарейкой релиза. Запуск с `--status` должен вернуть код 0, 1 или 2 с полной версией в первой строке. На раннере Antigravity не установлен, поэтому ожидается код 2.
+- EXE и отчёты проверки сохраняются как артефакт запуска `AG_<версия>_windows`. После загрузки артефакта выполняются тесты с `-D warnings`. Если тесты не прошли, запуск помечается ошибкой, а артефакт остаётся доступным.
+- Релиз на GitHub этот workflow не создаёт и в существующие релизы файлы не добавляет. Релизы публикует только workflow macOS.
+
+[Конфигурация workflow](../.github/workflows/windows.yml) · [Запуски workflow Windows](https://github.com/Breakdownx/psychotic-fork/actions/workflows/windows.yml) · [Диагностика и восстановление в Windows](windows.md)

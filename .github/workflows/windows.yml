@@ -1,0 +1,218 @@
+name: Windows
+
+# Builds the Windows exe, checks the file that came out, and attaches it to the
+# run as a workflow artifact - on every push and pull request, and on demand.
+#
+# Nothing is published here: the macOS workflow owns the GitHub releases, and
+# the exe is meant to be downloaded from this run's "Artifacts" section.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    # x86-64. The exe also runs on ARM Windows under emulation; a native ARM64
+    # build is a separate target and is not part of this job.
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+          rustc -V
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+
+      # The version the exe is named after and reports. Two shapes of tag:
+      # v2.35.1 - the release that goes with Antigravity 2.35.1, the version in
+      # Cargo.toml - and v2.35.1_1, _2, ... - fixes of the unlocker in between,
+      # Cargo.toml unchanged. The full version reaches the binary (window title,
+      # --status, update check) through AG_FULL_VERSION (build.rs). Without a tag
+      # the Cargo.toml version is used as it stands.
+      - name: Version
+        id: ver
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' -List).Matches[0].Groups[1].Value
+          $full = $cargo
+          if ($env:TAG) {
+            $full = $env:TAG -replace '^v', ''
+            if ($full -ne $cargo -and $full -notmatch ('^' + [regex]::Escape($cargo) + '_\d+$')) {
+              Write-Output "::error::Тег $env:TAG не подходит к версии $cargo из Cargo.toml: нужен v$cargo или v${cargo}_<число> (например v${cargo}_1). Для новой версии Antigravity поднимите version в Cargo.toml (и Cargo.lock)."
+              exit 1
+            }
+            "AG_FULL_VERSION=$full" >> $env:GITHUB_ENV
+          }
+          "cargo=$cargo" >> $env:GITHUB_OUTPUT
+          "full=$full" >> $env:GITHUB_OUTPUT
+          "exe=AG_$full.exe" >> $env:GITHUB_OUTPUT
+          Write-Output "[INFO] Версия пакета: $cargo, версия сборки: $full"
+
+      # No RUSTFLAGS on this step, on purpose: it would replace
+      # target.x86_64-pc-windows-msvc.rustflags from .cargo/config.toml and the
+      # exe would ship without `+crt-static`, which a clean Windows 10 refuses
+      # before main ("VCRUNTIME140.dll was not found"). The check below is what
+      # proves the flag held.
+      - name: Build
+        env:
+          # The window offers this repository's releases (src/update.rs).
+          AG_RELEASES_REPO: ${{ github.repository }}
+        run: |
+          cargo build --release --locked --bin ag_unlocker --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/ag_unlocker.exe `
+            (Join-Path dist '${{ steps.ver.outputs.exe }}')
+
+      # What a local release build checks (build_rust.py), plus the two one-shot
+      # CLI modes actually run on the file that will be downloaded. The GUI needs
+      # a desktop session and is not startable here.
+      - name: Check the exe
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = (Resolve-Path dist).Path
+          $exe = (Resolve-Path (Join-Path $dist '${{ steps.ver.outputs.exe }}')).Path
+          $size = (Get-Item -LiteralPath $exe).Length
+          $mb = [math]::Round($size / 1MB, 1)
+          Write-Output "[INFO] $([IO.Path]::GetFileName($exe)): $mb МБ"
+          if ($size -lt 2MB) {
+            Write-Output "::error::$mb МБ - для сборки с GUI это не похоже на готовый exe."
+            exit 1
+          }
+
+          # The C runtime has to be inside the exe: VCRUNTIME140.dll comes with
+          # the Visual C++ Redistributable, which a clean Windows 10 lacks.
+          $text = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($exe)).ToLowerInvariant()
+          if ($text.Contains('vcruntime140.dll')) {
+            Write-Output "::error::exe требует VCRUNTIME140.dll - статический CRT не применился (.cargo/config.toml; шаг Build не должен задавать RUSTFLAGS)."
+            exit 1
+          }
+          Write-Output "[INFO] VCRUNTIME140.dll не нужен - статический CRT на месте."
+
+          # Paths of the build machine are not secret on a throwaway runner, but
+          # the local build strips them, so the difference is worth logging.
+          foreach ($needle in @('c:\users\runneradmin', '\.cargo\registry')) {
+            if ($text.Contains($needle)) {
+              Write-Output "[INFO] В exe встречается путь сборочной машины: $needle"
+            }
+          }
+
+          # A windows-subsystem exe writes to the console of whoever started it
+          # (utils::attach_parent_console), or to its stdout when that is already
+          # a file or a pipe - which is how its output is captured here.
+          #
+          # Run through System.Diagnostics.Process, not Start-Process: with
+          # redirection Start-Process starts the exe itself and hands back a
+          # Process looked up by PID, holding no handle. A run that ends before
+          # anything looks at it - --version takes milliseconds - then leaves
+          # ExitCode empty, and the check would fail a good exe. Each run has a
+          # deadline: a flag the binary does not recognise opens the window
+          # instead, and waiting without one would hang the job.
+          function Invoke-Exe([string] $flag) {
+            $psi = [Diagnostics.ProcessStartInfo]::new($exe)
+            $psi.ArgumentList.Add($flag)
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $utf8 = [Text.UTF8Encoding]::new($false)
+            $psi.StandardOutputEncoding = $utf8
+            $psi.StandardErrorEncoding = $utf8
+            $p = [Diagnostics.Process]::Start($psi)
+            # Both pipes read at once: a full stderr pipe would otherwise stall
+            # a process that is still writing to stdout.
+            $out = $p.StandardOutput.ReadToEndAsync()
+            $err = $p.StandardError.ReadToEndAsync()
+            if (-not $p.WaitForExit(120000)) {
+              $p.Kill($true)
+              # Write-Host: output of a function would end up in $run and be
+              # lost to the exit.
+              Write-Host "::error::$flag не завершился за 2 минуты."
+              exit 1
+            }
+            $p.WaitForExit()
+            $name = $flag.TrimStart('-')
+            [IO.File]::WriteAllText((Join-Path $dist "ag-$name.txt"), $out.Result, $utf8)
+            [IO.File]::WriteAllText((Join-Path $dist "ag-$name.err"), $err.Result, $utf8)
+            Write-Host "--- $flag (код $($p.ExitCode)) ---"
+            Write-Host $out.Result
+            if ($err.Result) {
+              Write-Host "--- $flag, stderr ---"
+              Write-Host $err.Result
+            }
+            [pscustomobject]@{ Code = $p.ExitCode; Out = $out.Result }
+          }
+
+          # --version prints the attribution banner: the package version and the
+          # release canary baked in by build.rs.
+          $run = Invoke-Exe '--version'
+          if ($run.Code -ne 0) {
+            Write-Output "::error::--version вышел с кодом $($run.Code), ожидался 0."
+            exit 1
+          }
+          if ($run.Out -notmatch ('version:\s+' + [regex]::Escape('${{ steps.ver.outputs.cargo }}'))) {
+            Write-Output "::error::--version не сообщил версию ${{ steps.ver.outputs.cargo }}."
+            exit 1
+          }
+          if ($run.Out -notmatch 'build:\s+AGU-') {
+            Write-Output "::error::--version не сообщил канарейку релиза (build: AGU-...)."
+            exit 1
+          }
+
+          # --status is the read-only deep scan. Antigravity is not installed on
+          # the runner, so the documented code is 2 ("установок не найдено"); 0
+          # and 1 are the states of a machine that has one. Anything else means
+          # the binary never got as far as a report.
+          $run = Invoke-Exe '--status'
+          if ($run.Code -notin 0, 1, 2) {
+            Write-Output "::error::--status вышел с кодом $($run.Code) вместо 0, 1 или 2."
+            exit 1
+          }
+          if ($run.Code -ne 2) {
+            Write-Output "::warning::--status вернул $($run.Code) - на раннере нашлась установка Antigravity, ожидался код 2."
+          }
+          if ($run.Out -notmatch ('Antigravity Unlocker\s+' + [regex]::Escape('${{ steps.ver.outputs.full }}'))) {
+            Write-Output "::error::Отчёт --status не начинается с версии ${{ steps.ver.outputs.full }}."
+            exit 1
+          }
+          Write-Output "[INFO] exe запускается и отвечает на --version и --status."
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: AG_${{ steps.ver.outputs.full }}_windows
+          # The exe plus what the check produced on it (ag-version.txt,
+          # ag-status.txt and their stderr), so a download that misbehaves can be
+          # compared against the file as it left the runner.
+          path: dist
+          if-no-files-found: error
+
+      # Last on purpose, after the upload: the exe this job exists to produce is
+      # then in the run's Artifacts even when a test or a warning turns the job
+      # red, which is what you want from a job that publishes nothing. A failure
+      # here still fails the job.
+      - name: Test
+        env:
+          # Every target is warning-free since the crate-wide allow went; keep it
+          # so. An environment RUSTFLAGS *replaces* the per-target list from
+          # .cargo/config.toml, so the static CRT is repeated here - otherwise
+          # the tests would run against a different CRT than the exe ships with.
+          RUSTFLAGS: -D warnings -C target-feature=+crt-static
+        run: cargo test --locked --bin ag_unlocker --target x86_64-pc-windows-msvc
